@@ -9,5 +9,5 @@ pub mod parser;
 
 pub use crate::{
     groups::{Ed25519, Group},
-    interpreter::{EvalError, Scope, Value, ValueType, Var},
+    interpreter::{Code, Context, EvalError, Scope, Value, ValueType},
 };

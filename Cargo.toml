@@ -12,6 +12,7 @@ hex = "0.3.2"
 nom = "5.0.0"
 sha2 = "0.8.0"
 rand_core = "0.4.0"
+typed-arena = "1.5.0"
 
 [dependencies.nom_locate]
 git = "https://github.com/fflorent/nom_locate"

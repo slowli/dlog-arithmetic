@@ -5,14 +5,14 @@ use curve25519::{
 use ed25519::{PublicKey, Signature};
 use rand::thread_rng;
 
-use eccalc::{functions::*, parser::Statement, Ed25519, EvalError, Scope, Value};
+use eccalc::{functions::*, parser::Statement, Context, Ed25519, EvalError, Value};
 
 #[test]
 fn eval_arithmetic() {
     //! Checks that the evaluation order of arithmetic operations is as expected:
     //! operations with the same priority are performed from left to right.
 
-    let mut state = Scope::new(Ed25519);
+    let mut state = Context::new(Ed25519);
     let statements = Statement::list_from_str("1 - 2 + 3 - 4").unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(-Scalar::from(2_u64)));
@@ -35,8 +35,10 @@ fn eval_arithmetic() {
 
 #[test]
 fn eval_tuples() {
-    let mut state = Scope::new(Ed25519);
-    state.insert_constant("G", Value::Element(ED25519_BASEPOINT_POINT));
+    let mut state = Context::new(Ed25519);
+    state
+        .innermost_scope()
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     let statements = Statement::list_from_str("(5 + 6/2) * (1/2, [3]G)").unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(
@@ -68,7 +70,7 @@ fn eval_tuples() {
 
 #[test]
 fn partially_valid_assignment() {
-    let mut state = Scope::new(Ed25519);
+    let mut state = Context::new(Ed25519);
     let statements = Statement::list_from_str("(x, (y, z)) = (1, 2)").unwrap();
     assert!(state.evaluate(&statements).is_err());
     assert_eq!(
@@ -77,6 +79,125 @@ fn partially_valid_assignment() {
     );
     assert!(state.get_var("y").is_none());
     assert!(state.get_var("z").is_none());
+}
+
+#[test]
+fn scope_lookup() {
+    let mut state = Context::new(Ed25519);
+    state
+        .innermost_scope()
+        .insert_var("x", Value::Scalar(Scalar::from(1_u64)));
+    state.create_scope();
+    state
+        .innermost_scope()
+        .insert_var("x", Value::Scalar(Scalar::from(2_u64)));
+    assert_eq!(
+        *state.get_var("x").unwrap(),
+        Value::Scalar(Scalar::from(2_u64))
+    );
+
+    let statements = Statement::list_from_str("x + 3").unwrap();
+    let result = state.evaluate(&statements).unwrap();
+    assert_eq!(result, Value::Scalar(Scalar::from(5_u64)));
+}
+
+#[test]
+fn scope_creates_new_variable_space() {
+    const PROGRAM: &str = r#"
+        x = { x = 5; x + 2 };
+        { y = 8; x * y }
+    "#;
+    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let mut state = Context::new(Ed25519);
+    let result = state.evaluate(&statements).unwrap();
+    assert_eq!(result, Value::Scalar(Scalar::from(56_u8)));
+    assert_eq!(
+        *state.get_var("x").unwrap(),
+        Value::Scalar(Scalar::from(7_u64)),
+    );
+    assert!(state.get_var("y").is_none());
+}
+
+#[test]
+fn function_basics() {
+    const PROGRAM: &str = r#"
+        fn foo(x, y) {
+            x + y
+        };
+        :foo(3, 5)
+    "#;
+
+    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let mut state = Context::new(Ed25519);
+    state
+        .innermost_scope()
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+    let result = state.evaluate(&statements).unwrap();
+    assert_eq!(result, Value::Scalar(Scalar::from(8_u64)));
+
+    let statements = Statement::list_from_str(":foo([3]G, [7]G)").unwrap();
+    let result = state.evaluate(&statements).unwrap();
+    assert_eq!(
+        result,
+        Value::Element(ED25519_BASEPOINT_POINT * Scalar::from(10_u64))
+    );
+}
+
+#[test]
+fn function_capturing_vars() {
+    const PROGRAM: &str = r#"
+        x = 3;
+        fn foo(y) { x + y };
+        :foo(5)
+    "#;
+
+    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let mut state = Context::new(Ed25519);
+    let result = state.evaluate(&statements).unwrap();
+    assert_eq!(result, Value::Scalar(Scalar::from(8_u64)));
+
+    // The captured variable should be copied into the scope.
+    let statements = Statement::list_from_str("x = 10; :foo(9)").unwrap();
+    let result = state.evaluate(&statements).unwrap();
+    assert_eq!(result, Value::Scalar(Scalar::from(12_u64)));
+}
+
+#[test]
+fn function_capturing_functions() {
+    const PROGRAM: &str = r#"
+        fn keypair() { :sc_rand() * (1, G) };
+        :keypair()
+    "#;
+
+    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let mut state = Context::new(Ed25519);
+    state
+        .innermost_scope()
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT))
+        .insert_fn("sc_rand", Rand::new(thread_rng()));
+    state.create_scope();
+    let result = state.evaluate(&statements).unwrap();
+    if let Value::Tuple(ref fragments) = result {
+        if let [Value::Scalar(x), Value::Element(key)] = fragments[..] {
+            assert_eq!(x * ED25519_BASEPOINT_POINT, key);
+        } else {
+            panic!("Unexpected return value: {:?}", result);
+        }
+    } else {
+        panic!("Unexpected return value: {:?}", result);
+    }
+
+    const PROGRAM_WITH_REDEFINED_FN: &str = r#"
+        fn foo(x) { 2 * x };
+        fn bar() { :foo(25) };
+        :bar() ?= 50;
+        fn foo(x) { 3 * x };
+        :bar() ?= 50; # `bar()` should capture first `foo()` definition.
+    "#;
+    state.pop_scope();
+    state.create_scope();
+    let statements = Statement::list_from_str(PROGRAM_WITH_REDEFINED_FN).unwrap();
+    assert!(state.evaluate(&statements).is_ok());
 }
 
 #[test]
@@ -95,11 +216,13 @@ fn eval_ed25519() {
     "#;
     let statements = Statement::list_from_str(PROGRAM).unwrap();
 
-    let mut state = Scope::new(Ed25519);
+    let mut state = Context::new(Ed25519);
     state
-        .insert_fn("sc_rand", Rand(thread_rng()))
+        .innermost_scope()
+        .insert_fn("sc_rand", Rand::new(thread_rng()))
         .insert_fn("sc_sha512", FromSha512)
-        .insert_constant("G", Value::Element(ED25519_BASEPOINT_POINT));
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+    state.create_scope();
     state.evaluate(&statements).unwrap();
 
     let public_key = state.get_var("A").unwrap().as_element().unwrap();
@@ -112,6 +235,50 @@ fn eval_ed25519() {
     signature[32..].copy_from_slice(signature_s.as_bytes());
     let signature = Signature::from_bytes(&signature[..]).unwrap();
     assert!(public_key.verify(b"ABC", &signature).is_ok());
+}
+
+#[test]
+fn ed25519_as_functions() {
+    const FUNCTIONS: &str = r#"
+        # Key generation
+        fn gen() { :sc_rand() * (1, G) };
+
+        # Signing
+        fn sign(x, msg) {
+            (r, R) = :gen();
+            c = :sc_sha512(R, [x]G, msg);
+            (R, r + c * x)
+        };
+
+        # Verification
+        fn verify(K, (R, s), msg) {
+            c = :sc_sha512(R, K, msg);
+            [s]G ?= R + [c]K
+        };
+    "#;
+    let statements = Statement::list_from_str(FUNCTIONS).unwrap();
+
+    let mut state = Context::new(Ed25519);
+    state
+        .innermost_scope()
+        .insert_fn("sc_rand", Rand::new(thread_rng()))
+        .insert_fn("sc_sha512", FromSha512)
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+    state.create_scope();
+    assert!(state.evaluate(&statements).is_ok());
+
+    const EVAL_PROGRAM: &str = r#"
+        (x, K) = :gen();
+        signature = :sign(x, m);
+        :verify(K, signature, m);
+    "#;
+    let statements = Statement::list_from_str(EVAL_PROGRAM).unwrap();
+    for message in &[b"ABC" as &[_], b"message", b"!!!"] {
+        state
+            .innermost_scope()
+            .insert_var("m", Value::Buffer(message.to_vec()));
+        state.evaluate(&statements).unwrap();
+    }
 }
 
 #[test]
@@ -140,12 +307,14 @@ fn eval_ed25519_chaum_pedersen_proof() {
     "#;
     let statements = Statement::list_from_str(PROGRAM).unwrap();
 
-    let mut state = Scope::new(Ed25519);
+    let mut state = Context::new(Ed25519);
     state
-        .insert_fn("sc_rand", Rand(thread_rng()))
+        .innermost_scope()
+        .insert_fn("sc_rand", Rand::new(thread_rng()))
         .insert_fn("sc_sha512", FromSha512)
-        .insert_constant("O", Value::Element(EdwardsPoint::identity()))
-        .insert_constant("G", Value::Element(ED25519_BASEPOINT_POINT));
+        .insert_var("O", Value::Element(EdwardsPoint::identity()))
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+    state.create_scope();
     state.evaluate(&statements).unwrap();
 
     const PROGRAM_CONT: &str = r#"

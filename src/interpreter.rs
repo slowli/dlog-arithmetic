@@ -1,12 +1,13 @@
 use failure_derive::*;
-use std::{collections::HashMap, fmt, ops};
+use std::{collections::HashMap, fmt, ops, rc::Rc};
+use typed_arena::Arena;
 
 use crate::{
-    functions::{FnArgs, FnType, Function},
+    functions::{FnArgs, FnType, Function, InterpretedFn},
     groups::Group,
     parser::{
-        map_span, map_span_ref, BinaryOp, Expr, LiteralType, Lvalue, Spanned, SpannedExpr,
-        SpannedLvalue, SpannedStatement,
+        map_span, map_span_ref, BinaryOp, Error as ParseError, Expr, LiteralType, Lvalue, Spanned,
+        SpannedExpr, SpannedLvalue, SpannedStatement, Statement,
     },
 };
 
@@ -182,55 +183,23 @@ impl<G: Group> ops::Mul for Value<G> {
     }
 }
 
-/// Variable description.
-#[derive(Clone)]
-pub struct Var<G: Group> {
-    /// Current value.
-    pub value: Value<G>,
-    /// Flag signalizing if this variable is a constant.
-    pub constant: bool,
-}
-
-impl<G: Group> fmt::Debug for Var<G>
-where
-    G::Scalar: fmt::Debug,
-    G::Element: fmt::Debug,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter
-            .debug_struct("Var")
-            .field("value", &self.value)
-            .field("constant", &self.constant)
-            .finish()
-    }
-}
-
-impl<G: Group> Var<G> {
-    /// Creates a new variable.
-    pub fn new(value: Value<G>) -> Self {
-        Self {
-            value,
-            constant: false,
-        }
-    }
-
-    /// Creates a new constant.
-    pub fn constant(value: Value<G>) -> Self {
-        Self {
-            value,
-            constant: true,
-        }
-    }
-}
-
 /// Variable scope containing functions and variables.
-pub struct Scope<G: Group> {
-    group: G,
-    variables: HashMap<String, Var<G>>,
-    functions: HashMap<String, (FnType, Box<dyn Function<G>>)>,
+#[derive(Clone)]
+pub struct Scope<'a, G: Group> {
+    variables: HashMap<String, Value<G>>,
+    functions: HashMap<String, (FnType, Rc<dyn Function<G> + 'a>)>,
 }
 
-impl<G: Group> fmt::Debug for Scope<G>
+impl<G: Group> Default for Scope<'_, G> {
+    fn default() -> Self {
+        Self {
+            variables: HashMap::new(),
+            functions: HashMap::new(),
+        }
+    }
+}
+
+impl<G: Group> fmt::Debug for Scope<'_, G>
 where
     G::Scalar: fmt::Debug,
     G::Element: fmt::Debug,
@@ -239,67 +208,127 @@ where
         formatter
             .debug_map()
             .entries(&self.variables)
-            .entries(self.functions.iter().map(|(name, (ty, _))| {
-                (format!(":{}", name), ty)
-            }))
+            .entries(
+                self.functions
+                    .iter()
+                    .map(|(name, (ty, _))| (format!(":{}", name), ty)),
+            )
             .finish()
     }
 }
 
-impl<G: Group> Scope<G> {
+impl<'a, G: Group> Scope<'a, G> {
     /// Creates a new scope with no associated variables and functions.
-    pub fn new(group: G) -> Self {
-        Scope {
-            group,
-            variables: HashMap::new(),
-            functions: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Checks if the scope contains a variable with the specified name.
+    pub fn contains_var(&self, name: &str) -> bool {
+        self.variables.contains_key(name)
     }
 
     /// Gets the variable with the specified name.
     pub fn get_var(&self, name: &str) -> Option<&Value<G>> {
-        self.variables.get(name).map(|var| &var.value)
+        self.variables.get(name)
     }
 
-    /// Returns an interator over all variables in this scope.
-    pub fn variables<'s>(&'s self) -> impl Iterator<Item = (&str, &Var<G>)> + 's {
+    /// Returns an iterator over all variables in this scope.
+    pub fn variables<'s>(&'s self) -> impl Iterator<Item = (&str, &Value<G>)> + 's {
         self.variables
             .iter()
             .map(|(name, value)| (name.as_str(), value))
     }
 
-    /// Defines a variable with the specified name and value.
-    pub fn insert_var(&mut self, name: &str, value: Value<G>) -> &mut Self {
-        self.variables.insert(name.to_owned(), Var::new(value));
-        self
+    /// Returns an iterator over functions defined in this scope.
+    pub fn functions<'s>(&'s self) -> impl Iterator<Item = (&str, &FnType)> + 's {
+        self.functions
+            .iter()
+            .map(|(name, (ty, _))| (name.as_str(), ty))
     }
 
-    /// Defines a constant with the specified name and value.
-    // TODO: probably can be removed if embedded scopes are implemented
-    pub fn insert_constant(&mut self, name: &str, value: Value<G>) -> &mut Self {
-        self.variables.insert(name.to_owned(), Var::constant(value));
+    /// Defines a variable with the specified name and value.
+    pub fn insert_var(&mut self, name: &str, value: Value<G>) -> &mut Self {
+        self.variables.insert(name.to_owned(), value);
         self
     }
 
     /// Removes all variables from the scope. Constants and functions are not removed.
     pub fn clear(&mut self) {
-        self.variables.retain(|_, var| var.constant);
+        self.variables.clear();
+    }
+
+    /// Checks if the scope contains a function with the specified name.
+    pub fn contains_fn(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
     }
 
     /// Defines a function with the specified name.
     pub fn insert_fn<F>(&mut self, name: &str, fun: F) -> &mut Self
     where
-        F: Function<G> + 'static,
+        F: Function<G> + 'a,
     {
         let fn_type = fun.ty();
         self.functions
-            .insert(name.to_owned(), (fn_type, Box::new(fun)));
+            .insert(name.to_owned(), (fn_type, Rc::new(fun)));
         self
+    }
+
+    pub(crate) fn insert_fn_inner(&mut self, name: &str, fun: (FnType, Rc<dyn Function<G> + 'a>)) {
+        self.functions.insert(name.to_owned(), fun);
+    }
+
+    pub(crate) fn assign<'lv>(
+        &mut self,
+        lvalue: &SpannedLvalue<'lv>,
+        rvalue: Value<G>,
+    ) -> Result<(), Spanned<'lv, EvalError>> {
+        match lvalue.extra {
+            Lvalue::Variable { ref ty } => {
+                if let Some(ref ty) = ty {
+                    let actual = rvalue.ty();
+                    if ty.extra != actual {
+                        return Err(map_span_ref(
+                            ty,
+                            EvalError::AnnotatedTypeMismatch { actual },
+                        ));
+                    }
+                }
+                let var_name = lvalue.fragment;
+                if var_name != "_" {
+                    self.variables.insert(var_name.to_owned(), rvalue);
+                }
+            }
+
+            Lvalue::Tuple(ref assignments) => {
+                if let Value::Tuple(fragments) = rvalue {
+                    if assignments.len() != fragments.len() {
+                        return Err(map_span_ref(
+                            lvalue,
+                            EvalError::TupleLenMismatch {
+                                expected: assignments.len(),
+                                actual: fragments.len(),
+                            },
+                        ));
+                    }
+
+                    for (assignment, fragment) in assignments.iter().zip(fragments) {
+                        self.assign(assignment, fragment)?;
+                    }
+                } else {
+                    return Err(map_span_ref(
+                        lvalue,
+                        EvalError::CannotDestructure(rvalue.ty()),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 /// Possible value type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq)]
 pub enum ValueType {
     /// Any type.
     Any,
@@ -313,6 +342,23 @@ pub enum ValueType {
     Buffer,
     /// Tuple.
     Tuple(Vec<ValueType>),
+}
+
+impl PartialEq for ValueType {
+    fn eq(&self, other: &Self) -> bool {
+        use self::ValueType::*;
+        match (self, other) {
+            (Any, _)
+            | (_, Any)
+            | (Void, Void)
+            | (Scalar, Scalar)
+            | (Element, Element)
+            | (Buffer, Buffer) => true,
+
+            (Tuple(xs), Tuple(ys)) => xs == ys,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for ValueType {
@@ -458,14 +504,87 @@ pub enum EvalError {
         actual: usize,
     },
 
-    /// LHS of the assignment is a constant.
-    #[fail(display = "Cannot assign to a constant")]
-    CannotAssignToConstant,
+    /// Function definition within a function, which is not yet supported.
+    #[fail(display = "Embedded functions are not yet supported")]
+    EmbeddedFunction,
 }
 
-impl<G: Group> Scope<G> {
+/// Stack of variable scopes that can be used to evaluate `Statement`s.
+pub struct Context<'a, G: Group> {
+    pub(crate) group: G,
+    scopes: Vec<Scope<'a, G>>,
+}
+
+impl<G: Group> fmt::Debug for Context<'_, G>
+where
+    G::Scalar: fmt::Debug,
+    G::Element: fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter
+            .debug_struct("ScopeStack")
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+impl<'a, G: Group> Context<'a, G> {
+    /// Creates a new stack with a single global scope.
+    pub fn new(group: G) -> Self {
+        Self {
+            group,
+            scopes: vec![Scope::new()],
+        }
+    }
+
+    pub(crate) fn from_scope(group: G, scope: Scope<'a, G>) -> Self {
+        Self {
+            group,
+            scopes: vec![scope],
+        }
+    }
+
+    /// Returns an exclusive reference to the innermost scope.
+    pub fn innermost_scope(&mut self) -> &mut Scope<'a, G> {
+        self.scopes.last_mut().unwrap()
+    }
+
+    /// Creates a new scope and pushes it onto the stack.
+    pub fn create_scope(&mut self) {
+        self.scopes.push(Scope::new());
+    }
+
+    /// Pops the innermost scope.
+    pub fn pop_scope(&mut self) -> Option<Scope<'a, G>> {
+        if self.scopes.len() > 1 {
+            self.scopes.pop() // should always be `Some(_)`
+        } else {
+            None
+        }
+    }
+
+    /// Gets the variable with the specified name. The variable is looked up starting from
+    /// the innermost scope.
+    pub fn get_var(&self, name: &str) -> Option<&Value<G>> {
+        self.scopes
+            .iter()
+            .rev()
+            .filter_map(|scope| scope.get_var(name))
+            .next()
+    }
+
+    /// Gets the function with the specified name. The variable is looked up starting from
+    /// the innermost scope.
+    pub(crate) fn get_fn(&self, name: &str) -> Option<&(FnType, Rc<dyn Function<G> + 'a>)> {
+        self.scopes
+            .iter()
+            .rev()
+            .filter_map(|scope| scope.functions.get(name))
+            .next()
+    }
+
     /// Evaluates expression.
-    pub fn evaluate_expr<'a>(
+    pub fn evaluate_expr(
         &mut self,
         expr: &SpannedExpr<'a>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
@@ -511,16 +630,15 @@ impl<G: Group> Scope<G> {
             }
 
             Function { name, ref args } => {
-                let resolved_name = &name.fragment[1..];
-
-                self.functions
-                    .get(resolved_name)
-                    .ok_or_else(|| map_span(name, EvalError::UndefinedFunction))?;
                 let args: Result<Vec<_>, _> =
                     args.iter().map(|arg| self.evaluate_expr(arg)).collect();
                 let args = args?;
 
-                let (ty, func) = self.functions.get_mut(resolved_name).unwrap();
+                let resolved_name = &name.fragment[1..];
+                let (ty, func) = self
+                    .get_fn(resolved_name)
+                    .ok_or_else(|| map_span(name, EvalError::UndefinedFunction))?;
+
                 if let FnArgs::List(ref expected_types) = ty.args {
                     let arg_types: Vec<_> = args.iter().map(Value::ty).collect();
                     if &arg_types != expected_types {
@@ -573,64 +691,18 @@ impl<G: Group> Scope<G> {
                 }
                 .map_err(|e| map_span_ref(expr, e))
             }
-        }
-    }
 
-    fn assign<'a>(
-        &mut self,
-        lvalue: &SpannedLvalue<'a>,
-        rvalue: Value<G>,
-    ) -> Result<(), Spanned<'a, EvalError>> {
-        match lvalue.extra {
-            Lvalue::Variable { ref ty } => {
-                if let Some(ref ty) = ty {
-                    let actual = rvalue.ty();
-                    if ty.extra != actual {
-                        return Err(map_span_ref(
-                            ty,
-                            EvalError::AnnotatedTypeMismatch { actual },
-                        ));
-                    }
-                }
-                let var_name = lvalue.fragment;
-                if let Some(var) = self.variables.get(var_name) {
-                    if var.constant {
-                        return Err(map_span_ref(lvalue, EvalError::CannotAssignToConstant));
-                    }
-                }
-                if var_name != "_" {
-                    self.variables.insert(var_name.to_owned(), Var::new(rvalue));
-                }
-            }
-
-            Lvalue::Tuple(ref assignments) => {
-                if let Value::Tuple(fragments) = rvalue {
-                    if assignments.len() != fragments.len() {
-                        return Err(map_span_ref(
-                            lvalue,
-                            EvalError::TupleLenMismatch {
-                                expected: assignments.len(),
-                                actual: fragments.len(),
-                            },
-                        ));
-                    }
-
-                    for (assignment, fragment) in assignments.iter().zip(fragments) {
-                        self.assign(assignment, fragment)?;
-                    }
-                } else {
-                    return Err(map_span_ref(
-                        lvalue,
-                        EvalError::CannotDestructure(rvalue.ty()),
-                    ));
-                }
+            Block(ref statements) => {
+                self.create_scope();
+                let result = self.evaluate(statements);
+                self.scopes.pop(); // Clear the scope in any case
+                result
             }
         }
-        Ok(())
     }
 
     /// Evaluates a list of statements.
-    pub fn evaluate<'a>(
+    pub fn evaluate(
         &mut self,
         statements: &[SpannedStatement<'a>],
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
@@ -645,9 +717,15 @@ impl<G: Group> Scope<G> {
                 Expr(expr) => {
                     return_value = self.evaluate_expr(expr)?;
                 }
+
+                Fn(def) => {
+                    let fun = InterpretedFn::new(def, self)?;
+                    self.innermost_scope().insert_fn(def.name.fragment, fun);
+                }
+
                 Assignment { ref lhs, ref rhs } => {
                     let evaluated = self.evaluate_expr(rhs)?;
-                    self.assign(lhs, evaluated)?;
+                    self.scopes.last_mut().unwrap().assign(lhs, evaluated)?;
                 }
 
                 Comparison {
@@ -664,6 +742,40 @@ impl<G: Group> Scope<G> {
             }
         }
         Ok(return_value)
+    }
+}
+
+/// Arena-based code holder.
+#[derive(Default)]
+pub struct Code {
+    snippets: Arena<String>,
+}
+
+impl fmt::Debug for Code {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.debug_tuple("Code").field(&"_").finish()
+    }
+}
+
+impl Code {
+    /// Creates an empty code holder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds an expression to the holder.
+    pub fn add_expr(&self, code: String) -> Result<SpannedExpr, Spanned<ParseError>> {
+        let code = self.snippets.alloc(code);
+        Expr::from_str(code)
+    }
+
+    /// Adds a list of statements to the holder.
+    pub fn add_statements(
+        &self,
+        code: String,
+    ) -> Result<Vec<SpannedStatement>, Spanned<ParseError>> {
+        let code = self.snippets.alloc(code);
+        Statement::list_from_str(code)
     }
 }
 
@@ -711,8 +823,9 @@ mod tests {
 
     #[test]
     fn evaluating_scalar() {
-        let mut state = Scope::new(Ed25519);
+        let mut state = Context::new(Ed25519);
         state
+            .innermost_scope()
             .insert_fn("sc_sha512", FromSha512)
             .insert_var("x", Value::Scalar(Scalar::from(5_u64)))
             .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
@@ -767,7 +880,9 @@ mod tests {
             Value::Scalar(expected)
         );
 
-        state.insert_fn("sc_rand", Rand(thread_rng()));
+        state
+            .innermost_scope()
+            .insert_fn("sc_rand", Rand::new(thread_rng()));
         let scalar_expr = ":sc_rand()";
         let scalar_expr = Expr::from_str(scalar_expr).unwrap();
         let random_scalars: HashSet<_> = (0..5)
@@ -784,24 +899,25 @@ mod tests {
 
     #[test]
     fn evaluating_element() {
-        let mut state = Scope::new(Ed25519);
+        let code = Code::new();
+        let mut state = Context::new(Ed25519);
         state
+            .innermost_scope()
             .insert_var("x", Value::Scalar(Scalar::from(5_u64)))
-            .insert_constant("G", Value::Element(ED25519_BASEPOINT_POINT));
-        let element_expr = "x*G";
-        let element_expr = Expr::from_str(element_expr).unwrap();
+            .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+        let element_expr = code.add_expr("x*G".to_owned()).unwrap();
         let output = state.evaluate_expr(&element_expr).unwrap();
         let expected = ED25519_BASEPOINT_POINT * Scalar::from(5_u64);
         assert_eq!(output, Value::Element(expected));
 
         let element_expr = "((x + 1) / 2) * G";
-        let element_expr = Expr::from_str(element_expr).unwrap();
+        let element_expr = code.add_expr(element_expr.to_owned()).unwrap();
         let output = state.evaluate_expr(&element_expr).unwrap();
         let expected = ED25519_BASEPOINT_POINT * Scalar::from(3_u64);
         assert_eq!(output, Value::Element(expected));
 
         let element_expr = "(x/3) * G + [1/3]G";
-        let element_expr = Expr::from_str(element_expr).unwrap();
+        let element_expr = code.add_expr(element_expr.to_owned()).unwrap();
         let output = state.evaluate_expr(&element_expr).unwrap();
         let expected = ED25519_BASEPOINT_POINT * Scalar::from(2_u64);
         assert_eq!(output, Value::Element(expected));
@@ -809,11 +925,11 @@ mod tests {
         let random_scalar = Scalar::random(&mut thread_rng());
         let random_point = ED25519_BASEPOINT_POINT * random_scalar;
         let element_expr = format!(
-            "0xg{} - [0xs{}]G",
+            "0xg_{} - [0xs_{}]G",
             hex::encode(random_point.compress().as_bytes()),
             hex::encode(random_scalar.as_bytes())
         );
-        let element_expr = Expr::from_str(&element_expr).unwrap();
+        let element_expr = code.add_expr(element_expr).unwrap();
         let output = state.evaluate_expr(&element_expr).unwrap();
         if let Value::Element(output) = output {
             assert!(output.is_identity());

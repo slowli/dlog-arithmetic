@@ -258,7 +258,6 @@ fn hex_buffer(input: Span) -> NomResult<SpannedExpr> {
                         take_while1(|c: char| c.is_ascii_hexdigit()),
                     ),
                     |digits: Span| {
-                        println!("{:?}", digits);
                         hex::decode(digits.fragment).map_err(|e| Error::Hex(e).with_span(digits))
                     },
                 ),
@@ -335,7 +334,7 @@ pub enum Lvalue<'a> {
     /// Simple variable, e.g., `x` or `x: (Sc, Ge)`.
     Variable {
         /// Type annotation.
-        ty: Option<Spanned<'a, ValueType>>
+        ty: Option<Spanned<'a, ValueType>>,
     },
     /// Tuple destructuring, e.g., `(x, y)` or `(x: Sc, _)`.
     Tuple(Vec<SpannedLvalue<'a>>),
@@ -430,6 +429,9 @@ pub enum Expr<'a> {
 
     /// Tuple expression, e.g., `(x, y + z)`.
     Tuple(Vec<SpannedExpr<'a>>),
+
+    /// Block expression, e.g., `{ x = 3; x + y }`.
+    Block(Vec<SpannedStatement<'a>>),
 }
 
 /// `Expr` with the associated type and code span.
@@ -539,6 +541,10 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
         }),
         paren_expr,
         power_expr,
+        map(with_span(block), |mut spanned| {
+            let statements = mem::replace(&mut spanned.extra, vec![]);
+            map_span(spanned, Typed::any(Expr::Block(statements)))
+        }),
     ))(input)
 }
 
@@ -594,12 +600,14 @@ fn expr(input: Span) -> NomResult<SpannedExpr> {
 }
 
 /// Statement.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Statement<'a> {
     /// Empty statement.
     Empty,
     /// Expression, e.g., `x + (1, 2)`.
     Expr(SpannedExpr<'a>),
+    /// Function definition, e.g., `fn foo(x) { x + 1 }`.
+    Fn(FnDefinition<'a>),
 
     /// Assigment, e.g., `(x, y) = (5, 8)`.
     Assignment {
@@ -661,6 +669,7 @@ fn statement(input: Span) -> NomResult<Statement> {
     let comparison_parser = tuple((expr, delimited(ws, tag("?="), ws), cut(expr)));
 
     alt((
+        map(fun_def, Statement::Fn),
         map(comparison_parser, |(lhs, eq_sign, rhs)| {
             Statement::Comparison { lhs, eq_sign, rhs }
         }),
@@ -675,4 +684,52 @@ fn statement(input: Span) -> NomResult<Statement> {
             }
         }),
     ))(input)
+}
+
+fn block(input: Span) -> NomResult<Vec<SpannedStatement>> {
+    let parser = delimited(
+        terminated(tag_char('{'), ws),
+        tuple((
+            separated_list(delimited(ws, tag_char(';'), ws), with_span(statement)),
+            opt(preceded(ws, tag(";"))),
+        )),
+        preceded(ws, tag_char('}')),
+    );
+    map(parser, |(mut statements, maybe_semicolon)| {
+        if let Some(semicolon) = maybe_semicolon {
+            statements.push(map_span(semicolon, Statement::Empty));
+        }
+        statements
+    })(input)
+}
+
+/// Function definition, e.g., `fn foo(x, y) { x + y }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnDefinition<'a> {
+    /// Function name, e.g., `foo`.
+    pub name: Span<'a>,
+    /// Function arguments, e.g., `x, y`.
+    pub args: Vec<SpannedLvalue<'a>>,
+    /// Function body, e.g., `x + y`.
+    pub body: Vec<SpannedStatement<'a>>,
+}
+
+fn fun_def(input: Span) -> NomResult<FnDefinition> {
+    let parser = preceded(
+        terminated(tag("fn"), ws),
+        cut(tuple((
+            var_name,
+            delimited(
+                terminated(tag_char('('), ws),
+                separated_list(delimited(ws, tag_char(','), ws), lvalue),
+                preceded(ws, tag_char(')')),
+            ),
+            preceded(ws, block),
+        ))),
+    );
+    map(parser, |(name, args, body)| FnDefinition {
+        name,
+        args,
+        body,
+    })(input)
 }

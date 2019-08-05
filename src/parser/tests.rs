@@ -612,3 +612,85 @@ fn expr_evaluation_order() {
         Expr::Binary { op, .. } if op == BinaryOp::from_span(span(9, "+"))
     );
 }
+
+#[test]
+fn block_parsing() {
+    let input = Span::new("{ x + y }");
+    assert_eq!(
+        block(input).unwrap().1,
+        vec![map_span(
+            span(2, "x + y"),
+            Statement::Expr(sp(
+                2,
+                "x + y",
+                Expr::Binary {
+                    lhs: Box::new(sp(2, "x", Expr::Variable)),
+                    op: BinaryOp::from_span(span(4, "+")),
+                    rhs: Box::new(sp(6, "y", Expr::Variable)),
+                }
+            ))
+        )]
+    );
+
+    let input = Span::new("{ x = 1 + 2; x * 3 }");
+    assert_eq!(block(input).unwrap().1.len(), 2);
+}
+
+#[test]
+fn fn_definition_parsing() {
+    let input = Span::new("fn foo(x) { x + 3 }");
+    assert_eq!(
+        fun_def(input).unwrap().1,
+        FnDefinition {
+            name: span(3, "foo"),
+            args: vec![lsp(7, "x", Lvalue::Variable { ty: None }),],
+            body: vec![map_span(
+                span(12, "x + 3"),
+                Statement::Expr(sp(
+                    12,
+                    "x + 3",
+                    Expr::Binary {
+                        lhs: Box::new(sp(12, "x", Expr::Variable)),
+                        op: BinaryOp::from_span(span(14, "+")),
+                        rhs: Box::new(sp(16, "3", Expr::Number)),
+                    }
+                ))
+            )],
+        }
+    );
+
+    let input = Span::new("fn foo(x: Sc, (y, _: Ge)) { x + y }");
+    let mut def = fun_def(input).unwrap().1;
+    assert_eq!(def.body.len(), 1);
+    def.body.clear();
+    assert_eq!(
+        def,
+        FnDefinition {
+            name: span(3, "foo"),
+            args: vec![
+                lsp(
+                    7,
+                    "x",
+                    Lvalue::Variable {
+                        ty: Some(map_span(span(10, "Sc"), ValueType::Scalar)),
+                    }
+                ),
+                lsp(
+                    14,
+                    "(y, _: Ge)",
+                    Lvalue::Tuple(vec![
+                        lsp(15, "y", Lvalue::Variable { ty: None }),
+                        lsp(
+                            18,
+                            "_",
+                            Lvalue::Variable {
+                                ty: Some(map_span(span(21, "Ge"), ValueType::Element)),
+                            }
+                        )
+                    ])
+                ),
+            ],
+            body: vec![],
+        }
+    );
+}

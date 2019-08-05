@@ -8,7 +8,7 @@ use failure::Fail;
 use std::{convert::TryInto, ops};
 
 /// Finite prime-order group.
-pub trait Group {
+pub trait Group: Clone + 'static {
     /// Scalar type.
     type Scalar: Copy
         + Default

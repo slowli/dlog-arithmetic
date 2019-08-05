@@ -6,8 +6,8 @@ use codespan_reporting::{
 };
 use eccalc::{
     functions as fns,
-    parser::{Error as ParseError, Spanned, Statement},
-    Ed25519, EvalError, Group, Scope, Value,
+    parser::{Error as ParseError, Spanned},
+    Code, Context, Ed25519, EvalError, Group, Scope, Value,
 };
 use rand::thread_rng;
 use rustyline::{error::ReadlineError, Editor};
@@ -66,6 +66,7 @@ fn report_eval_error(writer: &StandardStream, code_map: &CodeMap<&str>, e: Spann
         )
         .into(),
 
+        // FIXME: make human-readable descriptions
         ref e => format!("{:?}", e).into(),
     };
     let diagnostic = Diagnostic::new(severity, e.extra.to_string())
@@ -116,33 +117,39 @@ fn dump_variable<G: Group>(
     }
 }
 
-fn dump_state<G: Group>(writer: &StandardStream, state: &Scope<G>) -> io::Result<()> {
+fn dump_scope<G: Group>(
+    writer: &StandardStream,
+    scope: &Scope<G>,
+    dump_fns: bool,
+) -> io::Result<()> {
     let mut writer = writer.lock();
-    for (name, var) in state.variables() {
-        if var.constant {
-            writer.set_color(ColorSpec::new().set_bold(true))?;
-            write!(writer, "const ")?;
-            writer.reset()?;
-        }
+    for (name, var) in scope.variables() {
         write!(writer, "{} = ", name)?;
-        dump_variable(&mut writer, &var.value, 0)?;
+        dump_variable(&mut writer, &var, 0)?;
         writeln!(writer)?;
+    }
+    if dump_fns {
+        for (name, ty) in scope.functions() {
+            writeln!(writer, ":{} : {}", name, ty)?;
+        }
     }
     Ok(())
 }
 
-fn parse_and_eval<G: Group>(
+fn parse_and_eval<'a, G: Group>(
     writer: &StandardStream,
     line: &str,
-    state: &mut Scope<G>,
+    code: &'a Code,
+    state: &mut Context<'a, G>,
 ) -> Result<(), ()> {
     let mut code_map = CodeMap::new();
     let file_map = code_map.add_filemap(FileName::Virtual("REPL".into()), line);
 
     if line.starts_with('.') {
         match line {
-            ".clear" => state.clear(),
-            ".dump" => dump_state(writer, state).unwrap(),
+            ".clear" => state.innermost_scope().clear(),
+            ".dump" => dump_scope(writer, state.innermost_scope(), false).unwrap(),
+            ".dump fns" => dump_scope(writer, state.innermost_scope(), true).unwrap(),
             ".help" => unimplemented!(),
 
             _ => {
@@ -157,7 +164,7 @@ fn parse_and_eval<G: Group>(
         return Ok(());
     }
 
-    let statements = Statement::list_from_str(line).map_err(|e| {
+    let statements = code.add_statements(line.to_owned()).map_err(|e| {
         report_parse_error(writer, &code_map, e);
     })?;
     let output = state.evaluate(&statements).map_err(|e| {
@@ -174,18 +181,22 @@ fn main() {
     let mut rl = Editor::<()>::new();
     let writer = StandardStream::stderr(ColorChoice::Auto);
     print_greeting(&writer).unwrap();
-    let mut state = Scope::new(Ed25519);
+
+    let code = Code::new();
+    let mut state = Context::new(Ed25519);
     state
+        .innermost_scope()
         .insert_fn("sc_sha512", fns::FromSha512)
-        .insert_fn("sc_rand", fns::Rand(thread_rng()))
-        .insert_constant("O", Value::Element(Ed25519.identity_element()))
-        .insert_constant("G", Value::Element(Ed25519.base_element()));
+        .insert_fn("sc_rand", fns::Rand::new(thread_rng()))
+        .insert_var("O", Value::Element(Ed25519.identity_element()))
+        .insert_var("G", Value::Element(Ed25519.base_element()));
+    state.create_scope();
 
     loop {
         let line = rl.readline(">>> ");
         match line {
             Ok(line) => {
-                if parse_and_eval(&writer, &line, &mut state).is_ok() {
+                if parse_and_eval(&writer, &line, &code, &mut state).is_ok() {
                     rl.add_history_entry(line);
                 }
             }
