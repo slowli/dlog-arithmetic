@@ -865,7 +865,8 @@ mod tests {
         let expected = Scalar::from_canonical_bytes(bytes).unwrap();
         assert_eq!(output, Value::Scalar(expected));
 
-        let scalar_expr = "0xs_01234567_89abcdef_01234567_89abcdef_01234567_89abcdef_01234567_89abcdef";
+        let scalar_expr =
+            "0xs_01234567_89abcdef_01234567_89abcdef_01234567_89abcdef_01234567_89abcdef";
         let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let error = state.evaluate_expr(&scalar_expr).unwrap_err();
         assert_matches!(

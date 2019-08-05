@@ -117,10 +117,7 @@ fn dump_variable<G: Group>(
     }
 }
 
-fn dump_scope<G: Group>(
-    writer: &StandardStream,
-    scope: &Scope<G>,
-) -> io::Result<()> {
+fn dump_scope<G: Group>(writer: &StandardStream, scope: &Scope<G>) -> io::Result<()> {
     let mut writer = writer.lock();
     for (name, var) in scope.variables() {
         write!(writer, "{} = ", name)?;

@@ -2,7 +2,10 @@
 
 use nom::{
     branch::alt,
-    bytes::{complete::{tag, take_while, take_while1, take_while_m_n}, streaming},
+    bytes::{
+        complete::{tag, take_while, take_while1, take_while_m_n},
+        streaming,
+    },
     character::complete::char as tag_char,
     combinator::{cut, map, map_res, opt, peek, recognize},
     error::{context, ErrorKind},
