@@ -2,7 +2,7 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while, take_while1, take_while_m_n},
+    bytes::{complete::{tag, take_while, take_while1, take_while_m_n}, streaming},
     character::complete::char as tag_char,
     combinator::{cut, map, map_res, opt, peek, recognize},
     error::{context, ErrorKind},
@@ -121,6 +121,8 @@ pub enum Error<'a> {
     Hex(hex::FromHexError),
     /// Leftover symbols after parsing.
     Leftovers,
+    /// Input is incomplete.
+    Incomplete,
 
     /// Other parsing error.
     Other {
@@ -147,6 +149,7 @@ impl fmt::Display for Error<'_> {
             Error::UnexpectedTerm { .. } => formatter.write_str("Unfinished expression"),
             Error::Hex(e) => write!(formatter, "Error decoding from hex: {}", e),
             Error::Leftovers => formatter.write_str("Uninterpreted characters after parsing"),
+            Error::Incomplete => formatter.write_str("Incomplete input"),
             Error::Other { .. } => write!(formatter, "Cannot parse sequence"),
         }
     }
@@ -232,7 +235,7 @@ impl<'a> nom::error::ParseError<Span<'a>> for SpannedError<'a> {
 /// Whitespace and `#...` comments.
 fn ws(input: Span) -> NomResult<Span> {
     fn narrow_ws(input: Span) -> NomResult<Span> {
-        take_while1(|c: char| c.is_ascii_whitespace())(input)
+        streaming::take_while1(|c: char| c.is_ascii_whitespace())(input)
     }
 
     let comment = preceded(tag_char('#'), take_while(|c: char| c != '\n'));
@@ -439,17 +442,18 @@ pub type SpannedExpr<'a> = Spanned<'a, Typed<Expr<'a>>>;
 
 impl Expr<'_> {
     /// Parses expression from a string.
-    pub fn from_str(input: &str) -> Result<SpannedExpr, Spanned<Error>> {
-        match expr(Span::new(input)) {
+    pub(crate) fn parse(input: &str) -> Result<SpannedExpr, Spanned<Error>> {
+        let input_span = Span::new(input);
+        match expr(input_span) {
             Ok((remaining, output)) => {
-                if remaining.fragment.is_empty() {
+                if remaining.fragment.is_empty() || remaining.fragment == "\0" {
                     Ok(output)
                 } else {
                     Err(Error::Leftovers.with_span(remaining).0)
                 }
             }
             Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => Err(e.0),
-            Err(_) => unreachable!(),
+            Err(NomErr::Incomplete(_)) => Err(Error::Incomplete.with_span(input_span).0),
         }
     }
 }
@@ -633,7 +637,7 @@ pub type SpannedStatement<'a> = Spanned<'a, Statement<'a>>;
 
 impl Statement<'_> {
     /// Parses a list of statements from a string.
-    pub fn list_from_str(input: &str) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
+    pub(crate) fn list_from_str(input: &str) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
         let parser = delimited(
             ws,
             tuple((
@@ -649,13 +653,14 @@ impl Statement<'_> {
             statements
         });
 
-        parser(Span::new(input))
+        let input_span = Span::new(input);
+        parser(input_span)
             .map_err(|e| match e {
                 NomErr::Failure(e) | NomErr::Error(e) => e.0,
-                _ => unreachable!(),
+                NomErr::Incomplete(_) => Error::Incomplete.with_span(input_span).0,
             })
             .and_then(|(remaining, statements)| {
-                if remaining.fragment.is_empty() {
+                if remaining.fragment.is_empty() || remaining.fragment == "\0" {
                     Ok(statements)
                 } else {
                     Err(Error::Leftovers.with_span(remaining).0)

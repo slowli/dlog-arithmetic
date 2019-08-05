@@ -120,7 +120,6 @@ fn dump_variable<G: Group>(
 fn dump_scope<G: Group>(
     writer: &StandardStream,
     scope: &Scope<G>,
-    dump_fns: bool,
 ) -> io::Result<()> {
     let mut writer = writer.lock();
     for (name, var) in scope.variables() {
@@ -128,10 +127,8 @@ fn dump_scope<G: Group>(
         dump_variable(&mut writer, &var, 0)?;
         writeln!(writer)?;
     }
-    if dump_fns {
-        for (name, ty) in scope.functions() {
-            writeln!(writer, ":{} : {}", name, ty)?;
-        }
+    for (name, ty) in scope.functions() {
+        writeln!(writer, ":{} : {}", name, ty)?;
     }
     Ok(())
 }
@@ -141,15 +138,14 @@ fn parse_and_eval<'a, G: Group>(
     line: &str,
     code: &'a Code,
     state: &mut Context<'a, G>,
-) -> Result<(), ()> {
+) -> Result<bool, ()> {
     let mut code_map = CodeMap::new();
     let file_map = code_map.add_filemap(FileName::Virtual("REPL".into()), line);
 
     if line.starts_with('.') {
         match line {
             ".clear" => state.innermost_scope().clear(),
-            ".dump" => dump_scope(writer, state.innermost_scope(), false).unwrap(),
-            ".dump fns" => dump_scope(writer, state.innermost_scope(), true).unwrap(),
+            ".dump" => dump_scope(writer, state.innermost_scope()).unwrap(),
             ".help" => unimplemented!(),
 
             _ => {
@@ -161,20 +157,29 @@ fn parse_and_eval<'a, G: Group>(
                 emit(&mut writer.lock(), &code_map, &diagnostic).unwrap();
             }
         }
-        return Ok(());
+        return Ok(false);
     }
 
-    let statements = code.add_statements(line.to_owned()).map_err(|e| {
-        report_parse_error(writer, &code_map, e);
+    let mut incomplete = false;
+    let statements = code.add_statements(line.to_owned()).or_else(|e| {
+        if e.extra == ParseError::Incomplete {
+            incomplete = true;
+            Ok(vec![])
+        } else {
+            report_parse_error(writer, &code_map, e);
+            Err(())
+        }
     })?;
-    let output = state.evaluate(&statements).map_err(|e| {
-        report_eval_error(writer, &code_map, e);
-    })?;
-    if output != Value::Void {
-        dump_variable(&mut writer.lock(), &output, 0).unwrap();
-    }
 
-    Ok(())
+    if !incomplete {
+        let output = state.evaluate(&statements).map_err(|e| {
+            report_eval_error(writer, &code_map, e);
+        })?;
+        if output != Value::Void {
+            dump_variable(&mut writer.lock(), &output, 0).unwrap();
+        }
+    }
+    Ok(incomplete)
 }
 
 fn main() {
@@ -191,13 +196,26 @@ fn main() {
         .insert_var("O", Value::Element(Ed25519.identity_element()))
         .insert_var("G", Value::Element(Ed25519.base_element()));
     state.create_scope();
+    let mut snippet = String::new();
+    let mut prompt = ">>> ";
 
     loop {
-        let line = rl.readline(">>> ");
+        let line = rl.readline(prompt);
         match line {
             Ok(line) => {
-                if parse_and_eval(&writer, &line, &code, &mut state).is_ok() {
+                snippet.push_str(&line);
+                if let Ok(incomplete) = parse_and_eval(&writer, &snippet, &code, &mut state) {
+                    if incomplete {
+                        prompt = "... ";
+                        snippet.push('\n');
+                    } else {
+                        prompt = ">>> ";
+                        snippet.clear();
+                    }
                     rl.add_history_entry(line);
+                } else {
+                    prompt = ">>> ";
+                    snippet.clear();
                 }
             }
 

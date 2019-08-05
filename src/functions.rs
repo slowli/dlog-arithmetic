@@ -27,7 +27,9 @@ pub struct FnType {
 impl fmt::Display for FnType {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(formatter, "fn({})", self.args)?;
-        if self.return_type != ValueType::Void {
+        if let ValueType::Void = self.return_type {
+            // We need to use `if let` rather than comparison to handle `return_type == Any`.
+        } else {
             write!(formatter, " -> {}", self.return_type)?;
         }
         Ok(())

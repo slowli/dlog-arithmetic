@@ -764,18 +764,29 @@ impl Code {
     }
 
     /// Adds an expression to the holder.
-    pub fn add_expr(&self, code: String) -> Result<SpannedExpr, Spanned<ParseError>> {
+    pub fn add_expr(&self, mut code: String) -> Result<SpannedExpr, Spanned<ParseError>> {
+        code.push('\0');
         let code = self.snippets.alloc(code);
-        Expr::from_str(code)
+        let len = code.len();
+        match Expr::parse(code) {
+            Ok(expr) => Ok(expr),
+            Err(_) => Expr::parse(&code[..(len - 1)]),
+        }
     }
 
     /// Adds a list of statements to the holder.
     pub fn add_statements(
         &self,
-        code: String,
+        mut code: String,
     ) -> Result<Vec<SpannedStatement>, Spanned<ParseError>> {
+        // FIXME: this is slow (we need to parse a string twice)
+        code.push('\0');
         let code = self.snippets.alloc(code);
-        Statement::list_from_str(code)
+        let len = code.len();
+        match Statement::list_from_str(code) {
+            Ok(statements) => Ok(statements),
+            Err(_) => Statement::list_from_str(&code[..(len - 1)]),
+        }
     }
 }
 
@@ -785,7 +796,6 @@ mod tests {
     use crate::{
         functions::{FromSha512, Rand},
         groups::{Ed25519, Ed25519Error},
-        parser::Expr,
     };
 
     use assert_matches::assert_matches;
@@ -823,6 +833,7 @@ mod tests {
 
     #[test]
     fn evaluating_scalar() {
+        let code = Code::new();
         let mut state = Context::new(Ed25519);
         state
             .innermost_scope()
@@ -830,25 +841,23 @@ mod tests {
             .insert_var("x", Value::Scalar(Scalar::from(5_u64)))
             .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
 
-        let scalar_expr = "(x + 1) * 10 + 9";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+        let scalar_expr = code.add_expr("(x + 1) * 10 + 9".to_owned()).unwrap();
         let output = state.evaluate_expr(&scalar_expr).unwrap();
         assert_eq!(output, Value::Scalar(Scalar::from(69_u64)));
 
-        let scalar_expr = "4/5";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+        let scalar_expr = code.add_expr("4/5".to_owned()).unwrap();
         let output = state.evaluate_expr(&scalar_expr).unwrap();
         let expected = Scalar::from(4_u64) * Scalar::from(5_u64).invert();
         assert_eq!(output, Value::Scalar(expected));
 
         let scalar_expr = "1 + 4 / (x + 1 - 6)";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+        let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let error = state.evaluate_expr(&scalar_expr).unwrap_err();
         assert_matches!(error.extra, EvalError::DivisionByZero);
 
         let scalar_expr =
-            "16 + 0xsdeaffeeddeaffeeddeaffeeddeaffeeddeaffeeddeaffeedfedcba0504030201";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+            "16 + 0xs_deaffeeddeaffeeddeaffeeddeaffeeddeaffeeddeaffeedfedcba0504030201";
+        let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let output = state.evaluate_expr(&scalar_expr).unwrap();
         let bytes = hex::decode("eeaffeeddeaffeeddeaffeeddeaffeeddeaffeeddeaffeedfedcba0504030201")
             .unwrap();
@@ -856,8 +865,8 @@ mod tests {
         let expected = Scalar::from_canonical_bytes(bytes).unwrap();
         assert_eq!(output, Value::Scalar(expected));
 
-        let scalar_expr = "0xs0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+        let scalar_expr = "0xs_01234567_89abcdef_01234567_89abcdef_01234567_89abcdef_01234567_89abcdef";
+        let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let error = state.evaluate_expr(&scalar_expr).unwrap_err();
         assert_matches!(
             error.extra,
@@ -866,7 +875,7 @@ mod tests {
         );
 
         let scalar_expr = ":sc_sha512(0x01000000, 1001 * G)";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+        let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let mut hasher = Sha512::default();
         hasher.input(&[1_u8, 0, 0, 0]);
         hasher.input(
@@ -884,7 +893,7 @@ mod tests {
             .innermost_scope()
             .insert_fn("sc_rand", Rand::new(thread_rng()));
         let scalar_expr = ":sc_rand()";
-        let scalar_expr = Expr::from_str(scalar_expr).unwrap();
+        let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let random_scalars: HashSet<_> = (0..5)
             .map(|_| {
                 if let Value::Scalar(sc) = state.evaluate_expr(&scalar_expr).unwrap() {

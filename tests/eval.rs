@@ -5,41 +5,45 @@ use curve25519::{
 use ed25519::{PublicKey, Signature};
 use rand::thread_rng;
 
-use eccalc::{functions::*, parser::Statement, Context, Ed25519, EvalError, Value};
+use eccalc::{functions::*, Code, Context, Ed25519, EvalError, Value};
 
 #[test]
 fn eval_arithmetic() {
     //! Checks that the evaluation order of arithmetic operations is as expected:
     //! operations with the same priority are performed from left to right.
 
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
-    let statements = Statement::list_from_str("1 - 2 + 3 - 4").unwrap();
+    let statements = code.add_statements("1 - 2 + 3 - 4".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(-Scalar::from(2_u64)));
 
-    let statements = Statement::list_from_str("1 / 2 * 3 / 4").unwrap();
+    let statements = code.add_statements("1 / 2 * 3 / 4".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(
         result,
         Value::Scalar(Scalar::from(3_u64) * Scalar::from(8_u64).invert())
     );
 
-    let statements = Statement::list_from_str("1 / (2 * 3) / 4").unwrap();
+    let statements = code.add_statements("1 / (2 * 3) / 4".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(24_u64).invert()));
 
-    let statements = Statement::list_from_str("1 + 2*3 - 4").unwrap();
+    let statements = code.add_statements("1 + 2*3 - 4".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(3_u64)));
 }
 
 #[test]
 fn eval_tuples() {
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
         .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
-    let statements = Statement::list_from_str("(5 + 6/2) * (1/2, [3]G)").unwrap();
+    let statements = code
+        .add_statements("(5 + 6/2) * (1/2, [3]G)".to_owned())
+        .unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(
         result,
@@ -49,7 +53,9 @@ fn eval_tuples() {
         ])
     );
 
-    let statements = Statement::list_from_str("(1/2, G) + (3, [4]G) / 2").unwrap();
+    let statements = code
+        .add_statements("(1/2, G) + (3, [4]G) / 2".to_owned())
+        .unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(
         result,
@@ -59,7 +65,9 @@ fn eval_tuples() {
         ])
     );
 
-    let statements = Statement::list_from_str("(X, _) = 5 * ([2]G, 2 + 3)").unwrap();
+    let statements = code
+        .add_statements("(X, _) = 5 * ([2]G, 2 + 3)".to_owned())
+        .unwrap();
     state.evaluate(&statements).unwrap();
     assert_eq!(
         *state.get_var("X").unwrap(),
@@ -70,8 +78,11 @@ fn eval_tuples() {
 
 #[test]
 fn partially_valid_assignment() {
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
-    let statements = Statement::list_from_str("(x, (y, z)) = (1, 2)").unwrap();
+    let statements = code
+        .add_statements("(x, (y, z)) = (1, 2)".to_owned())
+        .unwrap();
     assert!(state.evaluate(&statements).is_err());
     assert_eq!(
         *state.get_var("x").unwrap(),
@@ -83,6 +94,7 @@ fn partially_valid_assignment() {
 
 #[test]
 fn scope_lookup() {
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
@@ -96,7 +108,7 @@ fn scope_lookup() {
         Value::Scalar(Scalar::from(2_u64))
     );
 
-    let statements = Statement::list_from_str("x + 3").unwrap();
+    let statements = code.add_statements("x + 3".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(5_u64)));
 }
@@ -107,8 +119,10 @@ fn scope_creates_new_variable_space() {
         x = { x = 5; x + 2 };
         { y = 8; x * y }
     "#;
-    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
+
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(56_u8)));
     assert_eq!(
@@ -126,16 +140,16 @@ fn function_basics() {
         };
         :foo(3, 5)
     "#;
-
-    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
     state
         .innermost_scope()
         .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(8_u64)));
 
-    let statements = Statement::list_from_str(":foo([3]G, [7]G)").unwrap();
+    let statements = code.add_statements(":foo([3]G, [7]G)".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(
         result,
@@ -150,14 +164,14 @@ fn function_capturing_vars() {
         fn foo(y) { x + y };
         :foo(5)
     "#;
-
-    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(8_u64)));
 
     // The captured variable should be copied into the scope.
-    let statements = Statement::list_from_str("x = 10; :foo(9)").unwrap();
+    let statements = code.add_statements("x = 10; :foo(9)".to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
     assert_eq!(result, Value::Scalar(Scalar::from(12_u64)));
 }
@@ -169,8 +183,9 @@ fn function_capturing_functions() {
         :keypair()
     "#;
 
-    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let code = Code::new();
     let mut state = Context::new(Ed25519);
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
     state
         .innermost_scope()
         .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT))
@@ -196,7 +211,9 @@ fn function_capturing_functions() {
     "#;
     state.pop_scope();
     state.create_scope();
-    let statements = Statement::list_from_str(PROGRAM_WITH_REDEFINED_FN).unwrap();
+    let statements = code
+        .add_statements(PROGRAM_WITH_REDEFINED_FN.to_owned())
+        .unwrap();
     assert!(state.evaluate(&statements).is_ok());
 }
 
@@ -214,7 +231,8 @@ fn eval_ed25519() {
         # Verification
         [s]G ?= R + [c]A
     "#;
-    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let code = Code::new();
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
 
     let mut state = Context::new(Ed25519);
     state
@@ -256,7 +274,8 @@ fn ed25519_as_functions() {
             [s]G ?= R + [c]K
         };
     "#;
-    let statements = Statement::list_from_str(FUNCTIONS).unwrap();
+    let code = Code::new();
+    let statements = code.add_statements(FUNCTIONS.to_owned()).unwrap();
 
     let mut state = Context::new(Ed25519);
     state
@@ -272,7 +291,7 @@ fn ed25519_as_functions() {
         signature = :sign(x, m);
         :verify(K, signature, m);
     "#;
-    let statements = Statement::list_from_str(EVAL_PROGRAM).unwrap();
+    let statements = code.add_statements(EVAL_PROGRAM.to_owned()).unwrap();
     for message in &[b"ABC" as &[_], b"message", b"!!!"] {
         state
             .innermost_scope()
@@ -305,7 +324,8 @@ fn eval_ed25519_chaum_pedersen_proof() {
         powers = s * (G, K) - c * (enc - (O, [m]G));
         c ?= :sc_sha512(K, enc, powers)
     "#;
-    let statements = Statement::list_from_str(PROGRAM).unwrap();
+    let code = Code::new();
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
 
     let mut state = Context::new(Ed25519);
     state
@@ -323,7 +343,7 @@ fn eval_ed25519_chaum_pedersen_proof() {
         (R, E) = enc;
         c ?= :sc_sha512(K, R, E, [s]G - [c]R, [s]K - [c](E - [m]G))
     "#;
-    let statements = Statement::list_from_str(PROGRAM_CONT).unwrap();
+    let statements = code.add_statements(PROGRAM_CONT.to_owned()).unwrap();
     assert_matches!(
         state.evaluate(&statements).unwrap_err().extra,
         EvalError::AssertionFail
