@@ -633,7 +633,14 @@ fn block_parsing() {
     );
 
     let input = Span::new("{ x = 1 + 2; x * 3 }");
-    assert_eq!(block(input).unwrap().1.len(), 2);
+    let parsed = block(input).unwrap().1;
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[1].fragment, "x * 3");
+
+    let input = Span::new("{ x = 1 + 2; x * 3; }");
+    let parsed = block(input).unwrap().1;
+    assert_eq!(parsed.len(), 3);
+    assert_eq!(parsed[2].extra, Statement::Empty);
 }
 
 #[test]
@@ -735,4 +742,30 @@ fn incomplete_statement() {
         let input = Span::new(snippet);
         assert_matches!(statement(input).unwrap_err(), NomErr::Incomplete(_));
     }
+}
+
+#[test]
+fn separated_statements_parse() {
+    let input = Span::new("x = 1 + 2; x\0");
+    let statements = separated_statements(input).unwrap().1;
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].extra,
+        Statement::Expr(sp(11, "x", Expr::Variable))
+    );
+
+    let input = Span::new("fn foo(x) { 2*x } :foo(3)\0");
+    let statements = separated_statements(input).unwrap().1;
+    assert_eq!(statements.len(), 2);
+    assert_eq!(statements[1].fragment, ":foo(3)");
+
+    let input = Span::new("{ x = 2; }; :foo(3)\0");
+    let statements = separated_statements(input).unwrap().1;
+    assert_eq!(statements.len(), 2);
+    assert_eq!(statements[1].fragment, ":foo(3)");
+
+    let input = Span::new("y = { x = 2; x + 3 }; :foo(y)\0");
+    let statements = separated_statements(input).unwrap().1;
+    assert_eq!(statements.len(), 2);
+    assert_eq!(statements[1].fragment, ":foo(y)");
 }

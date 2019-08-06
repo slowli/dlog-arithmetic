@@ -765,6 +765,7 @@ impl Code {
 
     /// Adds an expression to the holder.
     pub fn add_expr(&self, mut code: String) -> Result<SpannedExpr, Spanned<ParseError>> {
+        // FIXME: this is slow (we need to parse the same string twice)
         code.push('\0');
         let code = self.snippets.alloc(code);
         let len = code.len();
@@ -779,13 +780,13 @@ impl Code {
         &self,
         mut code: String,
     ) -> Result<Vec<SpannedStatement>, Spanned<ParseError>> {
-        // FIXME: this is slow (we need to parse a string twice)
+        // FIXME: this is slow (we need to parse the same string twice)
         code.push('\0');
         let code = self.snippets.alloc(code);
         let len = code.len();
-        match Statement::list_from_str(code) {
+        match Statement::parse_list(code) {
             Ok(statements) => Ok(statements),
-            Err(_) => Statement::list_from_str(&code[..(len - 1)]),
+            Err(_) => Statement::parse_list(&code[..(len - 1)]),
         }
     }
 }

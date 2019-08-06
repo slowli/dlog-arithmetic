@@ -640,22 +640,8 @@ pub type SpannedStatement<'a> = Spanned<'a, Statement<'a>>;
 
 impl Statement<'_> {
     /// Parses a list of statements from a string.
-    pub(crate) fn list_from_str(input: &str) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
-        let parser = delimited(
-            ws,
-            tuple((
-                separated_list(delimited(ws, tag_char(';'), ws), with_span(statement)),
-                opt(preceded(ws, tag(";"))),
-            )),
-            ws,
-        );
-        let parser = map(parser, |(mut statements, maybe_semicolon)| {
-            if let Some(semicolon) = maybe_semicolon {
-                statements.push(map_span(semicolon, Statement::Empty));
-            }
-            statements
-        });
-
+    pub(crate) fn parse_list(input: &str) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
+        let parser = delimited(ws, separated_statements, ws);
         let input_span = Span::new(input);
         parser(input_span)
             .map_err(|e| match e {
@@ -669,6 +655,13 @@ impl Statement<'_> {
                     Err(Error::Leftovers.with_span(remaining).0)
                 }
             })
+    }
+
+    fn needs_semicolon(&self) -> bool {
+        match self {
+            Statement::Fn(_) => false,
+            _ => true,
+        }
     }
 }
 
@@ -694,21 +687,46 @@ fn statement(input: Span) -> NomResult<Statement> {
     ))(input)
 }
 
-fn block(input: Span) -> NomResult<Vec<SpannedStatement>> {
-    let parser = delimited(
-        terminated(tag_char('{'), ws),
-        tuple((
-            separated_list(delimited(ws, tag_char(';'), ws), with_span(statement)),
-            opt(preceded(ws, tag(";"))),
-        )),
-        preceded(ws, tag_char('}')),
-    );
-    map(parser, |(mut statements, maybe_semicolon)| {
-        if let Some(semicolon) = maybe_semicolon {
-            statements.push(map_span(semicolon, Statement::Empty));
+fn separated_statement(input: Span) -> NomResult<SpannedStatement> {
+    with_span(statement)(input).and_then(|(rest, statement)| {
+        if statement.extra.needs_semicolon() {
+            preceded(ws, tag_char(';'))(rest).map(|(rest, _)| (rest, statement))
+        } else {
+            Ok((rest, statement))
         }
-        statements
-    })(input)
+    })
+}
+
+fn separated_statements(input: Span) -> NomResult<Vec<SpannedStatement>> {
+    map(
+        tuple((
+            many0(terminated(separated_statement, ws)),
+            opt(with_span(statement)),
+        )),
+        |(mut statements, final_statement)| {
+            statements.push(final_statement.unwrap_or_else(|| {
+                if let Some(statement) = statements.last() {
+                    map_span_ref(statement, Statement::Empty)
+                } else {
+                    Spanned {
+                        offset: input.offset,
+                        line: input.line,
+                        fragment: "",
+                        extra: Statement::Empty,
+                    }
+                }
+            }));
+            statements
+        },
+    )(input)
+}
+
+fn block(input: Span) -> NomResult<Vec<SpannedStatement>> {
+    delimited(
+        terminated(tag_char('{'), ws),
+        separated_statements,
+        preceded(ws, tag_char('}')),
+    )(input)
 }
 
 /// Function definition, e.g., `fn foo(x, y) { x + y }`.

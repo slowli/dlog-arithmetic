@@ -4,6 +4,7 @@ use curve25519::{
 };
 use ed25519::{PublicKey, Signature};
 use rand::thread_rng;
+use sha2::{Digest, Sha512};
 
 use eccalc::{functions::*, Code, Context, Ed25519, EvalError, Value};
 
@@ -114,7 +115,7 @@ fn scope_lookup() {
 }
 
 #[test]
-fn scope_creates_new_variable_space() {
+fn block_creates_new_variable_space() {
     const PROGRAM: &str = r#"
         x = { x = 5; x + 2 };
         { y = 8; x * y }
@@ -133,11 +134,35 @@ fn scope_creates_new_variable_space() {
 }
 
 #[test]
+fn block_as_function_arg() {
+    const PROGRAM: &str = r#":sc_sha512({
+        x = 10000;
+        x * (1, G)
+    }, 0x_abcdef)"#;
+    let code = Code::new();
+    let mut state = Context::new(Ed25519);
+    state
+        .innermost_scope()
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT))
+        .insert_fn("sc_sha512", FromSha512);
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
+    let result = state.evaluate(&statements).unwrap();
+
+    let mut hash = Sha512::default();
+    let x = Scalar::from(10_000_u64);
+    hash.input(x.as_bytes());
+    hash.input((ED25519_BASEPOINT_POINT * x).compress().as_bytes());
+    hash.input(&[0xab, 0xcd, 0xef]);
+    let expected_scalar = Scalar::from_hash(hash);
+    assert_eq!(result, Value::Scalar(expected_scalar));
+}
+
+#[test]
 fn function_basics() {
     const PROGRAM: &str = r#"
         fn foo(x, y) {
             x + y
-        };
+        }
         :foo(3, 5)
     "#;
     let code = Code::new();
@@ -161,7 +186,7 @@ fn function_basics() {
 fn function_capturing_vars() {
     const PROGRAM: &str = r#"
         x = 3;
-        fn foo(y) { x + y };
+        fn foo(y) { x + y }
         :foo(5)
     "#;
     let code = Code::new();
@@ -179,7 +204,7 @@ fn function_capturing_vars() {
 #[test]
 fn function_capturing_functions() {
     const PROGRAM: &str = r#"
-        fn keypair() { :sc_rand() * (1, G) };
+        fn keypair() { :sc_rand() * (1, G) }
         :keypair()
     "#;
 
@@ -203,10 +228,10 @@ fn function_capturing_functions() {
     }
 
     const PROGRAM_WITH_REDEFINED_FN: &str = r#"
-        fn foo(x) { 2 * x };
-        fn bar() { :foo(25) };
+        fn foo(x) { 2 * x }
+        fn bar() { :foo(25) }
         :bar() ?= 50;
-        fn foo(x) { 3 * x };
+        fn foo(x) { 3 * x }
         :bar() ?= 50; # `bar()` should capture first `foo()` definition.
     "#;
     state.pop_scope();
@@ -259,20 +284,20 @@ fn eval_ed25519() {
 fn ed25519_as_functions() {
     const FUNCTIONS: &str = r#"
         # Key generation
-        fn gen() { :sc_rand() * (1, G) };
+        fn gen() { :sc_rand() * (1, G) }
 
         # Signing
         fn sign(x, msg) {
             (r, R) = :gen();
             c = :sc_sha512(R, [x]G, msg);
             (R, r + c * x)
-        };
+        }
 
         # Verification
         fn verify(K, (R, s), msg) {
             c = :sc_sha512(R, K, msg);
             [s]G ?= R + [c]K
-        };
+        }
     "#;
     let code = Code::new();
     let statements = code.add_statements(FUNCTIONS.to_owned()).unwrap();
