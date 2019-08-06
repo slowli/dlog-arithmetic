@@ -621,15 +621,15 @@ pub enum Statement<'a> {
         /// LHS of the assignment.
         lhs: SpannedLvalue<'a>,
         /// RHS of the assignment.
-        rhs: SpannedExpr<'a>,
+        rhs: Box<SpannedExpr<'a>>,
     },
 
     /// Comparison between 2 expressions, e.g., `[x]G ?= [y]K`.
     Comparison {
         /// LHS of the comparison.
-        lhs: SpannedExpr<'a>,
+        lhs: Box<SpannedExpr<'a>>,
         /// RHS of the comparison.
-        rhs: SpannedExpr<'a>,
+        rhs: Box<SpannedExpr<'a>>,
         /// Equality operator.
         eq_sign: Span<'a>,
     },
@@ -672,13 +672,17 @@ fn statement(input: Span) -> NomResult<Statement> {
     alt((
         map(fun_def, Statement::Fn),
         map(comparison_parser, |(lhs, eq_sign, rhs)| {
-            Statement::Comparison { lhs, eq_sign, rhs }
+            Statement::Comparison {
+                lhs: Box::new(lhs),
+                eq_sign,
+                rhs: Box::new(rhs),
+            }
         }),
         map(assignment_parser, |(lvalue, rvalue)| {
             if let Some(lvalue) = lvalue {
                 Statement::Assignment {
                     lhs: lvalue,
-                    rhs: rvalue,
+                    rhs: Box::new(rvalue),
                 }
             } else {
                 Statement::Expr(rvalue)

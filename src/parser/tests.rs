@@ -369,7 +369,7 @@ fn assignment_works() {
         statement(input).unwrap().1,
         Statement::Assignment {
             lhs: lsp(0, "x", Lvalue::Variable { ty: None }),
-            rhs: sp(
+            rhs: Box::new(sp(
                 4,
                 ":sc(0x1234)",
                 Expr::Function {
@@ -383,7 +383,7 @@ fn assignment_works() {
                         }
                     )],
                 }
-            )
+            ))
         }
     );
 
@@ -392,7 +392,7 @@ fn assignment_works() {
         statement(input).unwrap().1,
         Statement::Assignment {
             lhs: lsp(0, "yb", Lvalue::Variable { ty: None }),
-            rhs: sp(5, "7 * :sc(0x0001) + k", {
+            rhs: Box::new(sp(5, "7 * :sc(0x0001) + k", {
                 Expr::Binary {
                     lhs: Box::new(sp(
                         5,
@@ -420,7 +420,7 @@ fn assignment_works() {
                     op: BinaryOp::from_span(span(21, "+")),
                     rhs: Box::new(sp(23, "k", Expr::Variable)),
                 }
-            })
+            }))
         }
     );
 }
@@ -431,14 +431,14 @@ fn comparison_works() {
     assert_eq!(
         statement(input).unwrap().1,
         Statement::Comparison {
-            lhs: sp(0, "s*G", {
+            lhs: Box::new(sp(0, "s*G", {
                 Expr::Binary {
                     lhs: Box::new(sp(0, "s", Expr::Variable)),
                     op: BinaryOp::from_span(span(1, "*")),
                     rhs: Box::new(sp(2, "G", Expr::Variable)),
                 }
-            }),
-            rhs: sp(7, "R + h*A", {
+            })),
+            rhs: Box::new(sp(7, "R + h*A", {
                 Expr::Binary {
                     lhs: Box::new(sp(7, "R", Expr::Variable)),
                     op: BinaryOp::from_span(span(9, "+")),
@@ -452,7 +452,7 @@ fn comparison_works() {
                         },
                     )),
                 }
-            }),
+            })),
             eq_sign: span(4, "?="),
         }
     );
@@ -461,7 +461,7 @@ fn comparison_works() {
     assert_eq!(
         statement(input).unwrap().1,
         Statement::Comparison {
-            lhs: sp(
+            lhs: Box::new(sp(
                 0,
                 "[s]G",
                 Expr::Binary {
@@ -469,8 +469,8 @@ fn comparison_works() {
                     op: BinaryOp::from_span(span(2, "]")),
                     rhs: Box::new(sp(3, "G", Expr::Variable)),
                 }
-            ),
-            rhs: sp(
+            )),
+            rhs: Box::new(sp(
                 8,
                 "R + [h]A",
                 Expr::Binary {
@@ -486,7 +486,7 @@ fn comparison_works() {
                         },
                     )),
                 }
-            ),
+            )),
             eq_sign: span(5, "?="),
         }
     );
