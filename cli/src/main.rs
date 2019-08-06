@@ -170,7 +170,7 @@ fn parse_and_eval<'a, G: Group>(
 
     if !incomplete {
         let output = state.evaluate(&statements).map_err(|e| {
-            report_eval_error(writer, &code_map, e);
+            report_eval_error(writer, &code_map, e.inner);
         })?;
         if output != Value::Void {
             dump_variable(&mut writer.lock(), &output, 0).unwrap();
@@ -188,8 +188,8 @@ fn main() {
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
-        .insert_fn("sc_sha512", fns::FromSha512)
-        .insert_fn("sc_rand", fns::Rand::new(thread_rng()))
+        .insert_native_fn("sc_sha512", fns::FromSha512)
+        .insert_native_fn("sc_rand", fns::Rand::new(thread_rng()))
         .insert_var("O", Value::Element(Ed25519.identity_element()))
         .insert_var("G", Value::Element(Ed25519.base_element()));
     state.create_scope();

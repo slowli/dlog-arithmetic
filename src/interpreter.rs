@@ -3,11 +3,11 @@ use std::{collections::HashMap, fmt, ops, rc::Rc};
 use typed_arena::Arena;
 
 use crate::{
-    functions::{FnArgs, FnType, Function, InterpretedFn},
+    functions::{FnArgs, FnType, Function, InterpretedFn, NativeFn},
     groups::Group,
     parser::{
-        map_span, map_span_ref, BinaryOp, Error as ParseError, Expr, LiteralType, Lvalue, Spanned,
-        SpannedExpr, SpannedLvalue, SpannedStatement, Statement,
+        map_span, map_span_ref, BinaryOp, Error as ParseError, Expr, LiteralType, Lvalue, Span,
+        Spanned, SpannedExpr, SpannedLvalue, SpannedStatement, Statement,
     },
 };
 
@@ -187,7 +187,7 @@ impl<G: Group> ops::Mul for Value<G> {
 #[derive(Clone)]
 pub struct Scope<'a, G: Group> {
     variables: HashMap<String, Value<G>>,
-    functions: HashMap<String, (FnType, Rc<dyn Function<G> + 'a>)>,
+    functions: HashMap<String, Function<'a, G>>,
 }
 
 impl<G: Group> Default for Scope<'_, G> {
@@ -208,11 +208,7 @@ where
         formatter
             .debug_map()
             .entries(&self.variables)
-            .entries(
-                self.functions
-                    .iter()
-                    .map(|(name, (ty, _))| (format!(":{}", name), ty)),
-            )
+            .entries(&self.functions)
             .finish()
     }
 }
@@ -244,7 +240,7 @@ impl<'a, G: Group> Scope<'a, G> {
     pub fn functions<'s>(&'s self) -> impl Iterator<Item = (&str, &FnType)> + 's {
         self.functions
             .iter()
-            .map(|(name, (ty, _))| (name.as_str(), ty))
+            .map(|(name, fun)| (name.as_str(), fun.ty()))
     }
 
     /// Defines a variable with the specified name and value.
@@ -264,18 +260,18 @@ impl<'a, G: Group> Scope<'a, G> {
     }
 
     /// Defines a function with the specified name.
-    pub fn insert_fn<F>(&mut self, name: &str, fun: F) -> &mut Self
-    where
-        F: Function<G> + 'a,
-    {
-        let fn_type = fun.ty();
-        self.functions
-            .insert(name.to_owned(), (fn_type, Rc::new(fun)));
-        self
+    pub(crate) fn insert_fn(&mut self, name: &str, fun: Function<'a, G>) {
+        self.functions.insert(name.to_owned(), fun);
     }
 
-    pub(crate) fn insert_fn_inner(&mut self, name: &str, fun: (FnType, Rc<dyn Function<G> + 'a>)) {
-        self.functions.insert(name.to_owned(), fun);
+    /// Inserts a native function into the context.
+    pub fn insert_native_fn<F>(&mut self, name: &str, fun: F) -> &mut Self
+    where
+        F: NativeFn<G> + 'static,
+    {
+        self.functions
+            .insert(name.to_owned(), Function::native(fun));
+        self
     }
 
     pub(crate) fn assign<'lv>(
@@ -509,6 +505,35 @@ pub enum EvalError {
     EmbeddedFunction,
 }
 
+/// Call backtrace.
+#[derive(Debug, Default)]
+pub struct Backtrace<'a> {
+    calls: Vec<(&'a str, Span<'a>)>,
+}
+
+impl<'a> Backtrace<'a> {
+    /// Iterates over the backtrace, starting from the most recent call.
+    pub fn calls<'s>(&'s self) -> impl Iterator<Item = (&'a str, Span<'a>)> + 's {
+        self.calls.iter().rev().cloned()
+    }
+
+    /// Appends a function call into the backtrace.
+    fn push_call(&mut self, fn_name: &'a str, span: Span<'a>) {
+        self.calls.push((fn_name, span));
+    }
+
+    /// Pops a function call.
+    fn pop_call(&mut self) {
+        self.calls.pop();
+    }
+}
+
+#[derive(Debug)]
+pub struct ErrorWithBacktrace<'a> {
+    pub inner: Spanned<'a, EvalError>,
+    pub backtrace: Backtrace<'a>,
+}
+
 /// Stack of variable scopes that can be used to evaluate `Statement`s.
 pub struct Context<'a, G: Group> {
     pub(crate) group: G,
@@ -534,13 +559,6 @@ impl<'a, G: Group> Context<'a, G> {
         Self {
             group,
             scopes: vec![Scope::new()],
-        }
-    }
-
-    pub(crate) fn from_scope(group: G, scope: Scope<'a, G>) -> Self {
-        Self {
-            group,
-            scopes: vec![scope],
         }
     }
 
@@ -575,7 +593,7 @@ impl<'a, G: Group> Context<'a, G> {
 
     /// Gets the function with the specified name. The variable is looked up starting from
     /// the innermost scope.
-    pub(crate) fn get_fn(&self, name: &str) -> Option<&(FnType, Rc<dyn Function<G> + 'a>)> {
+    pub(crate) fn get_fn(&self, name: &str) -> Option<&Function<'a, G>> {
         self.scopes
             .iter()
             .rev()
@@ -583,20 +601,66 @@ impl<'a, G: Group> Context<'a, G> {
             .next()
     }
 
-    /// Evaluates expression.
-    pub fn evaluate_expr(
+    fn check_fn_args(
+        expr: &SpannedExpr<'a>,
+        args: &[Value<G>],
+        ty: &FnType,
+    ) -> Result<(), Spanned<'a, EvalError>> {
+        if let FnArgs::List(ref expected_types) = ty.args {
+            let arg_types: Vec<_> = args.iter().map(Value::ty).collect();
+            if &arg_types != expected_types {
+                return Err(map_span_ref(
+                    expr,
+                    EvalError::ArgTypeMismatch {
+                        expected: ty.args.clone(),
+                    },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn evaluate_fn(
         &mut self,
         expr: &SpannedExpr<'a>,
+        func: &InterpretedFn<'a, G>,
+        args: &[Value<G>],
+        backtrace: &mut Option<Backtrace<'a>>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
-        use crate::parser::Expr::*;
+        let name = match expr.extra.inner {
+            Expr::Function { name, .. } => name,
+            _ => unreachable!(),
+        };
+        if let Some(backtrace) = backtrace {
+            backtrace.push_call(&name.fragment[1..], name);
+        }
+        self.scopes.push(func.captures.clone());
+        for (lvalue, val) in func.args.iter().zip(args) {
+            self.innermost_scope().assign(lvalue, val.clone())?;
+        }
+        let result = self.evaluate_inner(&func.body, backtrace);
 
+        if result.is_ok() {
+            if let Some(backtrace) = backtrace {
+                backtrace.pop_call();
+            }
+        }
+        self.pop_scope();
+        result
+    }
+
+    fn evaluate_expr_inner(
+        &mut self,
+        expr: &SpannedExpr<'a>,
+        backtrace: &mut Option<Backtrace<'a>>,
+    ) -> Result<Value<G>, Spanned<'a, EvalError>> {
         match expr.extra.inner {
-            Variable => self
+            Expr::Variable => self
                 .get_var(expr.fragment)
                 .cloned()
                 .ok_or_else(|| map_span_ref(expr, EvalError::Undefined)),
 
-            Number => {
+            Expr::Number => {
                 let value = expr
                     .fragment
                     .parse::<u64>()
@@ -607,7 +671,7 @@ impl<'a, G: Group> Context<'a, G> {
                     .map_err(|e| map_span_ref(expr, EvalError::IntToScalar(e.into())))
             }
 
-            Literal { ty, ref value } => match ty {
+            Expr::Literal { ty, ref value } => match ty {
                 LiteralType::Buffer => Ok(Value::Buffer(value.clone())),
                 LiteralType::Scalar => self
                     .group
@@ -621,47 +685,45 @@ impl<'a, G: Group> Context<'a, G> {
                     .map_err(|e| map_span_ref(expr, EvalError::BufferToElement(e.into()))),
             },
 
-            Tuple(ref fragments) => {
+            Expr::Tuple(ref fragments) => {
                 let fragments: Result<Vec<_>, _> = fragments
                     .iter()
-                    .map(|frag| self.evaluate_expr(frag))
+                    .map(|frag| self.evaluate_expr_inner(frag, backtrace))
                     .collect();
                 fragments.map(Value::Tuple)
             }
 
-            Function { name, ref args } => {
-                let args: Result<Vec<_>, _> =
-                    args.iter().map(|arg| self.evaluate_expr(arg)).collect();
+            Expr::Function { name, ref args } => {
+                let args: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|arg| self.evaluate_expr_inner(arg, backtrace))
+                    .collect();
                 let args = args?;
 
                 let resolved_name = &name.fragment[1..];
-                let (ty, func) = self
-                    .get_fn(resolved_name)
-                    .ok_or_else(|| map_span(name, EvalError::UndefinedFunction))?;
-
-                if let FnArgs::List(ref expected_types) = ty.args {
-                    let arg_types: Vec<_> = args.iter().map(Value::ty).collect();
-                    if &arg_types != expected_types {
-                        return Err(map_span_ref(
-                            expr,
-                            EvalError::ArgTypeMismatch {
-                                expected: ty.args.clone(),
-                            },
-                        ));
+                if let Some(func) = self.get_fn(resolved_name).cloned() {
+                    Self::check_fn_args(expr, &args, func.ty())?;
+                    match func {
+                        Function::Interpreted(ref func) => {
+                            self.evaluate_fn(expr, func, &args, backtrace)
+                        }
+                        Function::Native(_, ref func) => func
+                            .execute(&args)
+                            .map_err(|e| map_span_ref(expr, EvalError::FunctionCall(e))),
                     }
+                } else {
+                    Err(map_span(name, EvalError::UndefinedFunction))
                 }
-                func.execute(&args)
-                    .map_err(|e| map_span_ref(expr, EvalError::FunctionCall(e)))
             }
 
             // Arithmetic operations
-            Binary {
+            Expr::Binary {
                 lhs: ref x,
                 rhs: ref y,
                 op,
             } => {
-                let lhs = self.evaluate_expr(x)?;
-                let rhs = self.evaluate_expr(y)?;
+                let lhs = self.evaluate_expr_inner(x, backtrace)?;
+                let rhs = self.evaluate_expr_inner(y, backtrace)?;
                 match op.extra {
                     BinaryOp::Add => lhs + rhs,
                     BinaryOp::Sub => lhs - rhs,
@@ -692,19 +754,33 @@ impl<'a, G: Group> Context<'a, G> {
                 .map_err(|e| map_span_ref(expr, e))
             }
 
-            Block(ref statements) => {
+            Expr::Block(ref statements) => {
                 self.create_scope();
-                let result = self.evaluate(statements);
+                let result = self.evaluate_inner(statements, backtrace);
                 self.scopes.pop(); // Clear the scope in any case
                 result
             }
         }
     }
 
+    /// Evaluates expression.
+    pub fn evaluate_expr(
+        &mut self,
+        expr: &SpannedExpr<'a>,
+    ) -> Result<Value<G>, ErrorWithBacktrace<'a>> {
+        let mut backtrace = Some(Backtrace::default());
+        self.evaluate_expr_inner(expr, &mut backtrace)
+            .map_err(|e| ErrorWithBacktrace {
+                inner: e,
+                backtrace: backtrace.unwrap(),
+            })
+    }
+
     /// Evaluates a list of statements.
-    pub fn evaluate(
+    fn evaluate_inner(
         &mut self,
         statements: &[SpannedStatement<'a>],
+        backtrace: &mut Option<Backtrace<'a>>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
         use crate::parser::Statement::*;
 
@@ -715,16 +791,17 @@ impl<'a, G: Group> Context<'a, G> {
                 Empty => {}
 
                 Expr(expr) => {
-                    return_value = self.evaluate_expr(expr)?;
+                    return_value = self.evaluate_expr_inner(expr, backtrace)?;
                 }
 
                 Fn(def) => {
                     let fun = InterpretedFn::new(def, self)?;
-                    self.innermost_scope().insert_fn(def.name.fragment, fun);
+                    self.innermost_scope()
+                        .insert_fn(def.name.fragment, Function::Interpreted(Rc::new(fun)));
                 }
 
                 Assignment { ref lhs, ref rhs } => {
-                    let evaluated = self.evaluate_expr(rhs)?;
+                    let evaluated = self.evaluate_expr_inner(rhs, backtrace)?;
                     self.scopes.last_mut().unwrap().assign(lhs, evaluated)?;
                 }
 
@@ -733,8 +810,8 @@ impl<'a, G: Group> Context<'a, G> {
                     ref rhs,
                     eq_sign,
                 } => {
-                    let lhs_eval = self.evaluate_expr(lhs)?;
-                    let rhs_eval = self.evaluate_expr(rhs)?;
+                    let lhs_eval = self.evaluate_expr_inner(lhs, backtrace)?;
+                    let rhs_eval = self.evaluate_expr_inner(rhs, backtrace)?;
                     if lhs_eval != rhs_eval {
                         return Err(map_span(*eq_sign, EvalError::AssertionFail));
                     }
@@ -742,6 +819,19 @@ impl<'a, G: Group> Context<'a, G> {
             }
         }
         Ok(return_value)
+    }
+
+    /// Evaluates a list of statements.
+    pub fn evaluate(
+        &mut self,
+        statements: &[SpannedStatement<'a>],
+    ) -> Result<Value<G>, ErrorWithBacktrace<'a>> {
+        let mut backtrace = Some(Backtrace::default());
+        self.evaluate_inner(statements, &mut backtrace)
+            .map_err(|e| ErrorWithBacktrace {
+                inner: e,
+                backtrace: backtrace.unwrap(),
+            })
     }
 }
 
@@ -838,7 +928,7 @@ mod tests {
         let mut state = Context::new(Ed25519);
         state
             .innermost_scope()
-            .insert_fn("sc_sha512", FromSha512)
+            .insert_native_fn("sc_sha512", FromSha512)
             .insert_var("x", Value::Scalar(Scalar::from(5_u64)))
             .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
 
@@ -854,7 +944,7 @@ mod tests {
         let scalar_expr = "1 + 4 / (x + 1 - 6)";
         let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let error = state.evaluate_expr(&scalar_expr).unwrap_err();
-        assert_matches!(error.extra, EvalError::DivisionByZero);
+        assert_matches!(error.inner.extra, EvalError::DivisionByZero);
 
         let scalar_expr =
             "16 + 0xs_deaffeeddeaffeeddeaffeeddeaffeeddeaffeeddeaffeedfedcba0504030201";
@@ -871,7 +961,7 @@ mod tests {
         let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let error = state.evaluate_expr(&scalar_expr).unwrap_err();
         assert_matches!(
-            error.extra,
+            error.inner.extra,
             EvalError::BufferToScalar(ref e)
                 if e.downcast_ref::<Ed25519Error>() == Some(&Ed25519Error::NonCanonicalScalar)
         );
@@ -893,7 +983,7 @@ mod tests {
 
         state
             .innermost_scope()
-            .insert_fn("sc_rand", Rand::new(thread_rng()));
+            .insert_native_fn("sc_rand", Rand::new(thread_rng()));
         let scalar_expr = ":sc_rand()";
         let scalar_expr = code.add_expr(scalar_expr.to_owned()).unwrap();
         let random_scalars: HashSet<_> = (0..5)

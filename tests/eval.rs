@@ -143,8 +143,8 @@ fn block_as_function_arg() {
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
-        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT))
-        .insert_fn("sc_sha512", FromSha512);
+        .insert_native_fn("sc_sha512", FromSha512)
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
     let result = state.evaluate(&statements).unwrap();
 
@@ -213,8 +213,8 @@ fn function_capturing_functions() {
     let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
     state
         .innermost_scope()
-        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT))
-        .insert_fn("sc_rand", Rand::new(thread_rng()));
+        .insert_native_fn("sc_rand", Rand::new(thread_rng()))
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     state.create_scope();
     let result = state.evaluate(&statements).unwrap();
     if let Value::Tuple(ref fragments) = result {
@@ -243,6 +243,56 @@ fn function_capturing_functions() {
 }
 
 #[test]
+fn capture_of_shadowed_native_fn() {
+    const PROGRAM: &str = r#"
+        fn keypair() { :sc_rand() * (1, G) }
+        fn sc_rand(x, y) { x + y }
+        5 ?= :sc_rand(2, 3);
+        :keypair()
+    "#;
+
+    let code = Code::new();
+    let mut state = Context::new(Ed25519);
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
+    state
+        .innermost_scope()
+        .insert_native_fn("sc_rand", Rand::new(thread_rng()))
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+    state.create_scope();
+    let result = state.evaluate(&statements).unwrap();
+    if let Value::Tuple(ref fragments) = result {
+        if let [Value::Scalar(x), Value::Element(key)] = fragments[..] {
+            assert_eq!(x * ED25519_BASEPOINT_POINT, key);
+        } else {
+            panic!("Unexpected return value: {:?}", result);
+        }
+    } else {
+        panic!("Unexpected return value: {:?}", result);
+    }
+}
+
+#[test]
+fn backtrace() {
+    const PROGRAM: &str = r#"
+        fn foo(x, y) { x + [2]y }
+        fn bar(x) { :foo(x, 2*x) }
+        :bar(3)
+    "#;
+
+    let code = Code::new();
+    let mut state = Context::new(Ed25519);
+    let statements = code.add_statements(PROGRAM.to_owned()).unwrap();
+    state
+        .innermost_scope()
+        .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
+    state.create_scope();
+    let err = state.evaluate(&statements).unwrap_err();
+    assert_matches!(err.inner.extra, EvalError::InvalidBinaryOp { op: "[]", .. });
+    let calls: Vec<_> = err.backtrace.calls().map(|(fn_name, _)| fn_name).collect();
+    assert_eq!(calls, ["foo", "bar"]);
+}
+
+#[test]
 fn eval_ed25519() {
     const PROGRAM: &str = r#"
         x = :sc_rand(); A = [x]G; # Keypair
@@ -262,8 +312,8 @@ fn eval_ed25519() {
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
-        .insert_fn("sc_rand", Rand::new(thread_rng()))
-        .insert_fn("sc_sha512", FromSha512)
+        .insert_native_fn("sc_rand", Rand::new(thread_rng()))
+        .insert_native_fn("sc_sha512", FromSha512)
         .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     state.create_scope();
     state.evaluate(&statements).unwrap();
@@ -305,8 +355,8 @@ fn ed25519_as_functions() {
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
-        .insert_fn("sc_rand", Rand::new(thread_rng()))
-        .insert_fn("sc_sha512", FromSha512)
+        .insert_native_fn("sc_rand", Rand::new(thread_rng()))
+        .insert_native_fn("sc_sha512", FromSha512)
         .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     state.create_scope();
     assert!(state.evaluate(&statements).is_ok());
@@ -355,8 +405,8 @@ fn eval_ed25519_chaum_pedersen_proof() {
     let mut state = Context::new(Ed25519);
     state
         .innermost_scope()
-        .insert_fn("sc_rand", Rand::new(thread_rng()))
-        .insert_fn("sc_sha512", FromSha512)
+        .insert_native_fn("sc_rand", Rand::new(thread_rng()))
+        .insert_native_fn("sc_sha512", FromSha512)
         .insert_var("O", Value::Element(EdwardsPoint::identity()))
         .insert_var("G", Value::Element(ED25519_BASEPOINT_POINT));
     state.create_scope();
@@ -370,7 +420,7 @@ fn eval_ed25519_chaum_pedersen_proof() {
     "#;
     let statements = code.add_statements(PROGRAM_CONT.to_owned()).unwrap();
     assert_matches!(
-        state.evaluate(&statements).unwrap_err().extra,
+        state.evaluate(&statements).unwrap_err().inner.extra,
         EvalError::AssertionFail
     );
 }

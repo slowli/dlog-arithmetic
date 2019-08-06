@@ -4,7 +4,7 @@ use curve25519::scalar::Scalar;
 use failure::Error;
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
-use std::{cell::RefCell, collections::HashSet, fmt};
+use std::{cell::RefCell, collections::HashSet, fmt, rc::Rc};
 
 use crate::{
     groups::Ed25519,
@@ -63,7 +63,7 @@ impl fmt::Display for FnArgs {
 }
 
 /// Function on zero or more `Value`s.
-pub trait Function<G: Group> {
+pub trait NativeFn<G: Group> {
     /// Returns the type signature of this function.
     fn ty(&self) -> FnType;
     /// Executes the function on the specified arguments.
@@ -74,7 +74,7 @@ pub trait Function<G: Group> {
 #[derive(Debug, Clone, Copy)]
 pub struct FromSha512;
 
-impl Function<Ed25519> for FromSha512 {
+impl NativeFn<Ed25519> for FromSha512 {
     fn ty(&self) -> FnType {
         FnType {
             args: FnArgs::Any,
@@ -116,7 +116,7 @@ impl<R: CryptoRng + RngCore> Rand<R> {
     }
 }
 
-impl<R: CryptoRng + RngCore> Function<Ed25519> for Rand<R> {
+impl<R: CryptoRng + RngCore> NativeFn<Ed25519> for Rand<R> {
     fn ty(&self) -> FnType {
         FnType {
             args: FnArgs::List(vec![]),
@@ -133,11 +133,10 @@ impl<R: CryptoRng + RngCore> Function<Ed25519> for Rand<R> {
 
 /// Function defined within the interpreter.
 pub struct InterpretedFn<'a, G: Group> {
-    args: Vec<SpannedLvalue<'a>>,
-    body: Vec<SpannedStatement<'a>>,
+    pub(crate) args: Vec<SpannedLvalue<'a>>,
+    pub(crate) body: Vec<SpannedStatement<'a>>,
     ty: FnType,
-    captures: Scope<'a, G>,
-    group: G,
+    pub(crate) captures: Scope<'a, G>,
 }
 
 impl<G: Group> fmt::Debug for InterpretedFn<'_, G>
@@ -182,8 +181,50 @@ impl<'a, G: Group> InterpretedFn<'a, G> {
             body: definition.body.clone(),
             ty,
             captures,
-            group: context.group.clone(),
         })
+    }
+
+    /// Returns the function type.
+    pub fn ty(&self) -> &FnType {
+        &self.ty
+    }
+}
+
+/// Container type for all functions.
+#[derive(Clone)]
+pub enum Function<'a, G: Group> {
+    /// Native function.
+    Native(FnType, Rc<dyn NativeFn<G>>),
+    /// Interpreted function.
+    Interpreted(Rc<InterpretedFn<'a, G>>),
+}
+
+impl<G: Group> fmt::Debug for Function<'_, G>
+where
+    G::Scalar: fmt::Debug,
+    G::Element: fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Function::Native(..) => formatter.debug_tuple("Native").field(&"_").finish(),
+            Function::Interpreted(func) => {
+                formatter.debug_tuple("Interpreted").field(func).finish()
+            }
+        }
+    }
+}
+
+impl<G: Group> Function<'_, G> {
+    pub(crate) fn native<F: NativeFn<G> + 'static>(f: F) -> Self {
+        Function::Native(f.ty(), Rc::new(f))
+    }
+
+    /// Returns the function type.
+    pub fn ty(&self) -> &FnType {
+        match self {
+            Function::Native(ty, _) => ty,
+            Function::Interpreted(func) => func.ty(),
+        }
     }
 }
 
@@ -239,9 +280,9 @@ fn process_vars<'a, G: Group>(
             }
             let fn_name = &name.fragment[1..];
             if captures.contains_fn(fn_name) {
-                // No action required
+                // No action required.
             } else if let Some(fun) = context.get_fn(fn_name) {
-                captures.insert_fn_inner(fn_name, fun.clone());
+                captures.insert_fn(fn_name, fun.clone());
             } else {
                 return Err(map_span_ref(&name, EvalError::UndefinedFunction));
             }
@@ -276,27 +317,5 @@ fn process_vars_in_statement<'a, G: Group>(
         }
         Statement::Empty => Ok(()),
         Statement::Fn(_) => Err(map_span_ref(statement, EvalError::EmbeddedFunction)),
-    }
-}
-
-impl<G: Group> InterpretedFn<'_, G> {
-    fn execute_inner(&self, args: &[Value<G>]) -> Result<Value<G>, Spanned<EvalError>> {
-        let mut context = Context::from_scope(self.group.clone(), self.captures.clone());
-        context.create_scope();
-        for (lvalue, val) in self.args.iter().zip(args) {
-            context.innermost_scope().assign(lvalue, val.clone())?;
-        }
-        context.evaluate(&self.body)
-    }
-}
-
-impl<G: Group> Function<G> for InterpretedFn<'_, G> {
-    fn ty(&self) -> FnType {
-        self.ty.clone()
-    }
-
-    fn execute(&self, args: &[Value<G>]) -> Result<Value<G>, Error> {
-        debug_assert_eq!(args.len(), self.args.len(), "Invalid number of args");
-        self.execute_inner(args).map_err(|e| e.extra.into())
     }
 }
