@@ -116,6 +116,23 @@ fn hex_buffer_works() {
 }
 
 #[test]
+fn string_literal_works() {
+    let input = Span::new(r#""abc";"#);
+    assert_eq!(string(input).unwrap().1, "abc");
+    let input = Span::new(r#""Hello, \"world\"!";"#);
+    assert_eq!(string(input).unwrap().1, r#"Hello, "world"!"#);
+    let input = Span::new(r#""Hello,\nworld!";"#);
+    assert_eq!(string(input).unwrap().1, "Hello,\nworld!");
+
+    // Unfinished string literal.
+    let input = Span::new("\"Hello, world!\n");
+    assert_matches!(string(input).unwrap_err(), NomErr::Failure(_));
+    // Unsupported escape sequence.
+    let input = Span::new(r#""Hello,\tworld!"#);
+    assert_matches!(string(input).unwrap_err(), NomErr::Failure(_));
+}
+
+#[test]
 fn var_name_works() {
     let input = Span::new("A + B");
     assert_eq!(var_name(input).unwrap().1, span(0, "A"));
@@ -339,6 +356,45 @@ fn element_expr_works() {
                     rhs: Box::new(sp(39, "D", Expr::Variable)),
                 }
             }))
+        }
+    );
+}
+
+#[test]
+fn negating_expr_works() {
+    let input = Span::new("-3;");
+    assert_eq!(
+        expr(input).unwrap().1.extra.inner,
+        Expr::Neg(Box::new(sp(1, "3", Expr::Number)))
+    );
+
+    let input = Span::new("-x;");
+    assert_eq!(
+        expr(input).unwrap().1.extra.inner,
+        Expr::Neg(Box::new(sp(1, "x", Expr::Variable)))
+    );
+
+    let input = Span::new("-(x + y);");
+    assert_eq!(
+        expr(input).unwrap().1.extra.inner,
+        Expr::Neg(Box::new(sp(
+            2,
+            "x + y",
+            Expr::Binary {
+                lhs: Box::new(sp(2, "x", Expr::Variable)),
+                op: BinaryOp::from_span(span(4, "+")),
+                rhs: Box::new(sp(6, "y", Expr::Variable)),
+            }
+        )))
+    );
+
+    let input = Span::new("2 * -3;");
+    assert_eq!(
+        expr(input).unwrap().1.extra.inner,
+        Expr::Binary {
+            lhs: Box::new(sp(0, "2", Expr::Number)),
+            op: BinaryOp::from_span(span(2, "*")),
+            rhs: Box::new(sp(4, "-3", Expr::Neg(Box::new(sp(5, "3", Expr::Number))))),
         }
     );
 }

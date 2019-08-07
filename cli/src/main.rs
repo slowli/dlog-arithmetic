@@ -4,7 +4,7 @@ use codespan_reporting::{
     termcolor::{Color, ColorChoice, ColorSpec, StandardStream, StandardStreamLock, WriteColor},
     Diagnostic, Label, LabelStyle, Severity,
 };
-use eccalc::{
+use dlog_arithmetic::{
     functions as fns,
     parser::{Error as ParseError, Span, Spanned, Statement},
     BacktraceElement, Code, Context, Ed25519, ErrorWithBacktrace, EvalError, Group, Scope, Value,
@@ -26,7 +26,11 @@ fn byte_span<T>(span: &Spanned<T>) -> ByteSpan {
 fn print_greeting(writer: &StandardStream) -> Result<(), io::Error> {
     let mut writer = writer.lock();
     writer.set_color(ColorSpec::new().set_bold(true))?;
-    writeln!(writer, "eccalc REPL v{}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(
+        writer,
+        "dlog-arithmetic REPL v{}",
+        env!("CARGO_PKG_VERSION")
+    )?;
     writer.reset()?;
     writeln!(writer, "{}", env!("CARGO_PKG_DESCRIPTION"))?;
     writeln!(writer, "Type `.help` for help.")

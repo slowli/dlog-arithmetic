@@ -741,6 +741,13 @@ impl<'a, G: Group> Context<'a, G> {
             }
 
             // Arithmetic operations
+            Expr::Neg(ref inner) => {
+                // FIXME: this may be slow
+                let val = self.evaluate_expr_inner(inner, backtrace)?;
+                let minus_one = Value::Scalar(-self.group.scalar_from_u64(1).unwrap());
+                (minus_one * val).map_err(|e| map_span_ref(expr, e))
+            }
+
             Expr::Binary {
                 lhs: ref x,
                 rhs: ref y,

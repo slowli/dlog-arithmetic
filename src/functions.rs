@@ -277,6 +277,9 @@ fn process_vars<'a, G: Group>(
                 process_vars(captures, local_vars, fragment, context)?;
             }
         }
+        Expr::Neg(ref inner) => {
+            process_vars(captures, local_vars, inner, context)?;
+        }
         Expr::Binary {
             ref lhs, ref rhs, ..
         } => {

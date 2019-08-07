@@ -6,7 +6,7 @@ use ed25519::{PublicKey, Signature};
 use rand::thread_rng;
 use sha2::{Digest, Sha512};
 
-use eccalc::{functions::*, Code, Context, Ed25519, EvalError, Value};
+use dlog_arithmetic::{functions::*, Code, Context, Ed25519, EvalError, Value};
 
 #[test]
 fn eval_arithmetic() {

@@ -3,7 +3,7 @@
 use nom::{
     branch::alt,
     bytes::{
-        complete::{tag, take_while, take_while1, take_while_m_n},
+        complete::{escaped_transform, is_not, tag, take_while, take_while1, take_while_m_n},
         streaming,
     },
     character::complete::char as tag_char,
@@ -246,6 +246,20 @@ fn ws(input: Span) -> NomResult<Span> {
     recognize(many0(ws_line))(input)
 }
 
+/// ASCII string like `"Hello, world!"`.
+fn string(input: Span) -> NomResult<String> {
+    let parser = escaped_transform(
+        is_not("\\\"\n"),
+        '\\',
+        alt((
+            map(tag_char('\\'), |_| "\\"),
+            map(tag_char('"'), |_| "\""),
+            map(tag_char('n'), |_| "\n"),
+        )),
+    );
+    preceded(tag_char('"'), cut(terminated(parser, tag_char('"'))))(input)
+}
+
 /// Hex-encoded buffer like `0x09abcd`.
 fn hex_buffer(input: Span) -> NomResult<SpannedExpr> {
     let hex_parser = preceded(
@@ -354,6 +368,7 @@ fn type_info(input: Span) -> NomResult<ValueType> {
         map(tag_char('_'), |_| ValueType::Any),
         map(tag("Sc"), |_| ValueType::Scalar),
         map(tag("Ge"), |_| ValueType::Element),
+        map(tag("Bytes"), |_| ValueType::Buffer),
         map(
             delimited(
                 terminated(tag_char('('), ws),
@@ -422,6 +437,9 @@ pub enum Expr<'a> {
         /// Function arguments.
         args: Vec<SpannedExpr<'a>>,
     },
+
+    /// Negation, e.g., `-x`.
+    Neg(Box<SpannedExpr<'a>>),
 
     /// Binary operation, e.g., `x + 1`.
     Binary {
@@ -553,9 +571,29 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
     alt((
         map(var_name, |span| map_span(span, Typed::any(Expr::Variable))),
         hex_buffer,
+        map(with_span(string), |mut spanned_str| {
+            let s = mem::replace(&mut spanned_str.extra, String::new());
+            let buffer = Expr::Literal {
+                value: s.into_bytes(),
+                ty: LiteralType::Buffer,
+            };
+            map_span(spanned_str, Typed::from_literal(buffer))
+        }),
         map(take_while1(|c: char| c.is_ascii_digit()), |span| {
             map_span(span, Typed::scalar(Expr::Number))
         }),
+        map(
+            with_span(tuple((terminated(tag_char('-'), ws), expr))),
+            |spanned| {
+                let (_, inner) = spanned.extra;
+                Spanned {
+                    offset: spanned.offset,
+                    line: spanned.line,
+                    fragment: spanned.fragment,
+                    extra: Typed::any(Expr::Neg(Box::new(inner))),
+                }
+            },
+        ),
         map(with_span(fun), |mut spanned| {
             let name = spanned.extra.0;
             let args = mem::replace(&mut spanned.extra.1, vec![]);
