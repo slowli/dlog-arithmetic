@@ -508,18 +508,33 @@ pub enum EvalError {
 /// Call backtrace.
 #[derive(Debug, Default)]
 pub struct Backtrace<'a> {
-    calls: Vec<(&'a str, Span<'a>)>,
+    calls: Vec<BacktraceElement<'a>>,
+}
+
+/// Function call.
+#[derive(Debug, Clone, Copy)]
+pub struct BacktraceElement<'a> {
+    /// Function name.
+    pub fn_name: &'a str,
+    /// Code span of the function definition.
+    pub def_span: Span<'a>,
+    /// Code span of the function call.
+    pub call_span: Span<'a>,
 }
 
 impl<'a> Backtrace<'a> {
     /// Iterates over the backtrace, starting from the most recent call.
-    pub fn calls<'s>(&'s self) -> impl Iterator<Item = (&'a str, Span<'a>)> + 's {
+    pub fn calls<'s>(&'s self) -> impl Iterator<Item = BacktraceElement<'a>> + 's {
         self.calls.iter().rev().cloned()
     }
 
     /// Appends a function call into the backtrace.
-    fn push_call(&mut self, fn_name: &'a str, span: Span<'a>) {
-        self.calls.push((fn_name, span));
+    fn push_call(&mut self, fn_name: &'a str, def_span: Span<'a>, call_span: Span<'a>) {
+        self.calls.push(BacktraceElement {
+            fn_name,
+            def_span,
+            call_span,
+        });
     }
 
     /// Pops a function call.
@@ -528,9 +543,12 @@ impl<'a> Backtrace<'a> {
     }
 }
 
+/// Error with the associated backtrace.
 #[derive(Debug)]
 pub struct ErrorWithBacktrace<'a> {
+    /// Error.
     pub inner: Spanned<'a, EvalError>,
+    /// Backtrace information.
     pub backtrace: Backtrace<'a>,
 }
 
@@ -593,7 +611,7 @@ impl<'a, G: Group> Context<'a, G> {
 
     /// Gets the function with the specified name. The variable is looked up starting from
     /// the innermost scope.
-    pub(crate) fn get_fn(&self, name: &str) -> Option<&Function<'a, G>> {
+    pub fn get_fn(&self, name: &str) -> Option<&Function<'a, G>> {
         self.scopes
             .iter()
             .rev()
@@ -631,14 +649,20 @@ impl<'a, G: Group> Context<'a, G> {
             Expr::Function { name, .. } => name,
             _ => unreachable!(),
         };
+        let def = &func.definition.extra;
+
         if let Some(backtrace) = backtrace {
-            backtrace.push_call(&name.fragment[1..], name);
+            backtrace.push_call(
+                &name.fragment[1..],
+                map_span_ref(&func.definition, ()),
+                map_span_ref(expr, ()),
+            );
         }
         self.scopes.push(func.captures.clone());
-        for (lvalue, val) in func.args.iter().zip(args) {
+        for (lvalue, val) in def.args.iter().zip(args) {
             self.innermost_scope().assign(lvalue, val.clone())?;
         }
-        let result = self.evaluate_inner(&func.body, backtrace);
+        let result = self.evaluate_inner(&def.body, backtrace);
 
         if result.is_ok() {
             if let Some(backtrace) = backtrace {
@@ -795,7 +819,7 @@ impl<'a, G: Group> Context<'a, G> {
                 }
 
                 Fn(def) => {
-                    let fun = InterpretedFn::new(def, self)?;
+                    let fun = InterpretedFn::new(map_span_ref(statement, def.clone()), self)?;
                     self.innermost_scope()
                         .insert_fn(def.name.fragment, Function::Interpreted(Rc::new(fun)));
                 }
@@ -853,31 +877,25 @@ impl Code {
         Self::default()
     }
 
-    /// Adds an expression to the holder.
-    pub fn add_expr(&self, mut code: String) -> Result<SpannedExpr, Spanned<ParseError>> {
-        // FIXME: this is slow (we need to parse the same string twice)
+    /// Adds a string to the holder terminated by a `\0` char.
+    pub fn add_terminated_string(&self, mut code: String) -> &str {
         code.push('\0');
-        let code = self.snippets.alloc(code);
-        let len = code.len();
-        match Expr::parse(code) {
-            Ok(expr) => Ok(expr),
-            Err(_) => Expr::parse(&code[..(len - 1)]),
-        }
+        self.snippets.alloc(code)
+    }
+
+    /// Adds an expression to the holder.
+    pub fn add_expr(&self, code: String) -> Result<SpannedExpr, Spanned<ParseError>> {
+        let code = Span::new(self.add_terminated_string(code));
+        Expr::parse(code)
     }
 
     /// Adds a list of statements to the holder.
     pub fn add_statements(
         &self,
-        mut code: String,
+        code: String,
     ) -> Result<Vec<SpannedStatement>, Spanned<ParseError>> {
-        // FIXME: this is slow (we need to parse the same string twice)
-        code.push('\0');
-        let code = self.snippets.alloc(code);
-        let len = code.len();
-        match Statement::parse_list(code) {
-            Ok(statements) => Ok(statements),
-            Err(_) => Statement::parse_list(&code[..(len - 1)]),
-        }
+        let code = Span::new(self.add_terminated_string(code));
+        Statement::parse_list(code)
     }
 }
 

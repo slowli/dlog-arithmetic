@@ -133,8 +133,7 @@ impl<R: CryptoRng + RngCore> NativeFn<Ed25519> for Rand<R> {
 
 /// Function defined within the interpreter.
 pub struct InterpretedFn<'a, G: Group> {
-    pub(crate) args: Vec<SpannedLvalue<'a>>,
-    pub(crate) body: Vec<SpannedStatement<'a>>,
+    pub(crate) definition: Spanned<'a, FnDefinition<'a>>,
     ty: FnType,
     pub(crate) captures: Scope<'a, G>,
 }
@@ -147,8 +146,7 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter
             .debug_struct("InterpretedFn")
-            .field("args", &self.args)
-            .field("body", &self.body)
+            .field("definition", &self.definition)
             .field("captures", &self.captures)
             .finish()
     }
@@ -157,28 +155,31 @@ where
 impl<'a, G: Group> InterpretedFn<'a, G> {
     /// Creates a new function.
     pub fn new(
-        definition: &FnDefinition<'a>,
+        definition: Spanned<'a, FnDefinition<'a>>,
         context: &Context<'a, G>,
     ) -> Result<Self, Spanned<'a, EvalError>> {
         let mut captures = Scope::new();
         let mut local_vars = HashSet::new();
 
-        for arg in &definition.args {
+        for arg in &definition.extra.args {
             set_local_vars(&mut local_vars, arg);
         }
-        for statement in &definition.body {
+        for statement in &definition.extra.body {
             process_vars_in_statement(&mut captures, &mut local_vars, statement, context)?;
         }
 
         // FIXME: use Hindley-Miller type inference
         let ty = FnType {
-            args: FnArgs::List((0..definition.args.len()).map(|_| ValueType::Any).collect()),
+            args: FnArgs::List(
+                (0..definition.extra.args.len())
+                    .map(|_| ValueType::Any)
+                    .collect(),
+            ),
             return_type: ValueType::Any,
         };
 
         Ok(Self {
-            args: definition.args.clone(),
-            body: definition.body.clone(),
+            definition,
             ty,
             captures,
         })
@@ -214,7 +215,7 @@ where
     }
 }
 
-impl<G: Group> Function<'_, G> {
+impl<'a, G: Group> Function<'a, G> {
     pub(crate) fn native<F: NativeFn<G> + 'static>(f: F) -> Self {
         Function::Native(f.ty(), Rc::new(f))
     }
@@ -224,6 +225,14 @@ impl<G: Group> Function<'_, G> {
         match self {
             Function::Native(ty, _) => ty,
             Function::Interpreted(func) => func.ty(),
+        }
+    }
+
+    /// Returns the definition of a function.
+    pub fn definition(&self) -> Option<&Spanned<'a, FnDefinition<'a>>> {
+        match self {
+            Function::Native(..) => None,
+            Function::Interpreted(func) => Some(&func.definition),
         }
     }
 }

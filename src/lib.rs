@@ -9,5 +9,8 @@ pub mod parser;
 
 pub use crate::{
     groups::{Ed25519, Group},
-    interpreter::{Backtrace, Code, Context, EvalError, Scope, Value, ValueType},
+    interpreter::{
+        Backtrace, BacktraceElement, Code, Context, ErrorWithBacktrace, EvalError, Scope, Value,
+        ValueType,
+    },
 };

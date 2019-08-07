@@ -445,8 +445,23 @@ pub type SpannedExpr<'a> = Spanned<'a, Typed<Expr<'a>>>;
 
 impl Expr<'_> {
     /// Parses expression from a string.
-    pub(crate) fn parse(input: &str) -> Result<SpannedExpr, Spanned<Error>> {
-        let input_span = Span::new(input);
+    pub fn parse(mut input_span: Span) -> Result<SpannedExpr, Spanned<Error>> {
+        // FIXME: this is slow (we need to parse the same string twice)
+        match Self::parse_inner(input_span) {
+            Ok(expr) => Ok(expr),
+            Err(err) => {
+                if input_span.fragment.ends_with('\0') {
+                    let len = input_span.fragment.len();
+                    input_span.fragment = &input_span.fragment[..(len - 1)];
+                    Self::parse_inner(input_span)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn parse_inner(input_span: Span) -> Result<SpannedExpr, Spanned<Error>> {
         match expr(input_span) {
             Ok((remaining, output)) => {
                 if remaining.fragment.is_empty() || remaining.fragment == "\0" {
@@ -639,11 +654,29 @@ pub enum Statement<'a> {
 pub type SpannedStatement<'a> = Spanned<'a, Statement<'a>>;
 
 impl Statement<'_> {
-    /// Parses a list of statements from a string.
-    pub(crate) fn parse_list(input: &str) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
-        let parser = delimited(ws, separated_statements, ws);
-        let input_span = Span::new(input);
-        parser(input_span)
+    /// Parses a list of statements.
+    ///
+    /// The `input_span` can be `'\0'`-terminated, in which case the parser tries to
+    /// interpret the code as a complete list of statements (i.e., an `Incomplete` error
+    /// is returned as a last resort).
+    pub fn parse_list(mut input_span: Span) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
+        // FIXME: this is slow (we need to parse the same string twice)
+        match Self::parse_list_inner(input_span) {
+            Ok(statements) => Ok(statements),
+            Err(err) => {
+                if input_span.fragment.ends_with('\0') {
+                    let len = input_span.fragment.len();
+                    input_span.fragment = &input_span.fragment[..(len - 1)];
+                    Self::parse_list_inner(input_span)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn parse_list_inner(input_span: Span) -> Result<Vec<SpannedStatement>, Spanned<Error>> {
+        delimited(ws, separated_statements, ws)(input_span)
             .map_err(|e| match e {
                 NomErr::Failure(e) | NomErr::Error(e) => e.0,
                 NomErr::Incomplete(_) => Error::Incomplete.with_span(input_span).0,

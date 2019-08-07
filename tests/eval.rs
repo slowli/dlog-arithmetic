@@ -288,7 +288,7 @@ fn backtrace() {
     state.create_scope();
     let err = state.evaluate(&statements).unwrap_err();
     assert_matches!(err.inner.extra, EvalError::InvalidBinaryOp { op: "[]", .. });
-    let calls: Vec<_> = err.backtrace.calls().map(|(fn_name, _)| fn_name).collect();
+    let calls: Vec<_> = err.backtrace.calls().map(|elem| elem.fn_name).collect();
     assert_eq!(calls, ["foo", "bar"]);
 }
 
