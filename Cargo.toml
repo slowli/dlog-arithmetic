@@ -1,8 +1,9 @@
 [package]
-name = "eccalc"
+name = "dlog-arithmetic"
 version = "0.1.0"
 authors = ["Alex Ostrovski <ostrovski.alex@gmail.com>"]
 edition = "2018"
+description = "Arithmetic for discrete log groups"
 
 [dependencies]
 curve25519 = { package = "curve25519-dalek", version = "1.0" }

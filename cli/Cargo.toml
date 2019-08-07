@@ -1,14 +1,14 @@
 [package]
-name = "eccalc-cli"
+name = "dlog-arithmetic-cli"
 version = "0.1.0"
 authors = ["Alex Ostrovski <ostrovski.alex@gmail.com>"]
 edition = "2018"
-description = "REPL environment for prime-order group arithmetic"
+description = "REPL environment for discrete log arithmetic"
 
 [dependencies]
 codespan = "0.3.0"
 codespan-reporting = "0.3.0"
-eccalc = { version = "0.1.0", path = ".." }
+dlog-arithmetic = { version = "0.1.0", path = ".." }
 failure = "0.1.5"
 hex = "0.3.2"
 rand = "0.6.5"
