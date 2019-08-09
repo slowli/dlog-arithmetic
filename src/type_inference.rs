@@ -4,7 +4,7 @@ use crate::{
     functions::{FnArgs, FnType, Function},
     interpreter::{Context, Value, ValueType},
     parser::{
-        map_span_ref, BinaryOp, Expr, Lvalue, Spanned, SpannedExpr, SpannedLvalue,
+        map_span_ref, BinaryOp, Expr, LiteralType, Lvalue, Spanned, SpannedExpr, SpannedLvalue,
         SpannedStatement, Statement,
     },
     Group,
@@ -171,37 +171,31 @@ impl<'a, G: Group> TypeContext<'a, G> {
     fn process_expr(
         &mut self,
         substitutions: &mut Substitutions,
-        expr: &mut SpannedExpr<'a>,
-    ) -> Result<(), Spanned<'a, TypeError>> {
+        expr: &SpannedExpr<'a>,
+    ) -> Result<ValueType, Spanned<'a, TypeError>> {
         use self::Expr::*;
 
-        match expr.extra.inner {
-            Variable => {
-                let ty = self.get_var_type(expr.fragment).ok_or_else(|| {
-                    map_span_ref(expr, TypeError::UndefinedVar(expr.fragment.to_owned()))
-                })?;
-                expr.extra.ty = ty.clone();
+        match expr.extra {
+            Variable => self.get_var_type(expr.fragment).ok_or_else(|| {
+                map_span_ref(expr, TypeError::UndefinedVar(expr.fragment.to_owned()))
+            }),
+
+            Number => Ok(ValueType::Scalar),
+            Literal { ty, .. } => Ok(match ty {
+                LiteralType::Buffer => ValueType::Buffer,
+                LiteralType::Scalar => ValueType::Scalar,
+                LiteralType::Element => ValueType::Element,
+            }),
+
+            Tuple(ref terms) => {
+                let term_types: Result<Vec<_>, _> = terms
+                    .iter()
+                    .map(|term| self.process_expr(substitutions, term))
+                    .collect();
+                term_types.map(ValueType::Tuple)
             }
 
-            Number | Literal { .. } => { /* type is already assigned */ }
-
-            Tuple(ref mut terms) => {
-                for term in terms.iter_mut() {
-                    self.process_expr(substitutions, term)?;
-                }
-
-                // `if let` should always match.
-                if let ValueType::Tuple(ref mut term_types) = expr.extra.ty {
-                    for (term, ty) in terms.iter().zip(term_types) {
-                        self.assign_new_type(ty);
-                        substitutions
-                            .unify(&term.extra.ty, ty)
-                            .map_err(|e| map_span_ref(term, e))?;
-                    }
-                }
-            }
-
-            Function { ref mut args, name } => {
+            Function { ref args, name } => {
                 let fn_name = &name.fragment[1..];
                 let fn_ty = self
                     .get_fn_type(fn_name)
@@ -221,81 +215,82 @@ impl<'a, G: Group> TypeContext<'a, G> {
                         return Err(e);
                     }
                 }
-                for arg in args.iter_mut() {
-                    self.process_expr(substitutions, arg)?;
-                }
+
+                let actual_types: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|arg| self.process_expr(substitutions, arg))
+                    .collect();
+                let actual_types = actual_types?;
 
                 if let FnArgs::List(ref arg_types) = fn_ty.args {
-                    for (arg, arg_ty) in args.iter().zip(arg_types) {
+                    for (i, (arg, arg_ty)) in actual_types.iter().zip(arg_types).enumerate() {
                         let rhs = self.instantiate_type(&arg_ty);
                         substitutions
-                            .unify(&arg.extra.ty, &rhs)
-                            .map_err(|e| map_span_ref(arg, e))?;
+                            .unify(arg, &rhs)
+                            .map_err(|e| map_span_ref(&args[i], e))?;
                     }
                 }
-                expr.extra.ty = self.instantiate_type(&fn_ty.return_type);
+                let return_type = self.instantiate_type(&fn_ty.return_type);
                 self.count += fn_ty.type_count;
+                Ok(return_type)
             }
 
-            Block(ref mut statements) => {
+            Block(ref statements) => {
                 self.scopes.push(TypeScope::default());
-                for statement in statements.iter_mut() {
-                    self.process_statement(substitutions, statement)?;
+                let mut return_type = ValueType::Void;
+                for (i, statement) in statements.iter().enumerate() {
+                    let ty = self.process_statement(substitutions, statement)?;
+                    if i == statements.len() - 1 {
+                        return_type = ty;
+                    }
                 }
                 // TODO: do we need to pop scope on error?
                 self.scopes.pop();
                 // The type returned by the block is equal to the type of the last statement.
-                expr.extra.ty = match statements.last().map(|s| &s.extra) {
-                    Some(Statement::Expr(last_expr)) => last_expr.extra.ty.clone(),
-                    _ => ValueType::Void,
-                };
+                Ok(return_type)
             }
 
-            Neg(ref mut inner) => {
-                self.process_expr(substitutions, inner)?;
-                expr.extra.ty = inner.extra.ty.clone();
-            }
+            Neg(ref inner) => self.process_expr(substitutions, inner),
             Binary {
-                ref mut lhs,
-                ref mut rhs,
+                ref lhs,
+                ref rhs,
                 op,
             } => {
-                self.process_expr(substitutions, lhs)?;
-                self.process_expr(substitutions, rhs)?;
+                let lhs_ty = self.process_expr(substitutions, lhs)?;
+                let rhs_ty = self.process_expr(substitutions, rhs)?;
 
                 match op.extra {
                     BinaryOp::Add | BinaryOp::Sub => {
-                        expr.extra.ty = rhs.extra.ty.clone();
                         substitutions
-                            .unify(&lhs.extra.ty, &rhs.extra.ty)
+                            .unify(&lhs_ty, &rhs_ty)
                             .map_err(|e| map_span_ref(expr, e))?;
+                        Ok(rhs_ty)
                     }
 
                     BinaryOp::Mul => {
-                        expr.extra.ty = rhs.extra.ty.clone();
                         substitutions
-                            .unify(&lhs.extra.ty, &ValueType::Scalar)
+                            .unify(&lhs_ty, &ValueType::Scalar)
                             .map_err(|e| map_span_ref(expr, e))?;
+                        Ok(rhs_ty)
                     }
 
                     BinaryOp::Div => {
-                        expr.extra.ty = lhs.extra.ty.clone();
                         substitutions
-                            .unify(&rhs.extra.ty, &ValueType::Scalar)
+                            .unify(&rhs_ty, &ValueType::Scalar)
                             .map_err(|e| map_span_ref(expr, e))?;
+                        Ok(lhs_ty)
                     }
 
                     BinaryOp::Power => {
-                        expr.extra.ty = rhs.extra.ty.clone();
                         substitutions
-                            .unify(&lhs.extra.ty, &ValueType::Scalar)
-                            .and_then(|()| substitutions.unify(&rhs.extra.ty, &ValueType::Element))
+                            .unify(&lhs_ty, &ValueType::Scalar)
+                            .and_then(|()| substitutions.unify(&rhs_ty, &ValueType::Element))
                             .map_err(|e| map_span_ref(expr, e))?;
+                        Ok(rhs_ty)
                     }
                 }
             }
         }
-        Ok(())
     }
 
     fn assign_new_type(&mut self, ty: &mut ValueType) {
@@ -331,102 +326,95 @@ impl<'a, G: Group> TypeContext<'a, G> {
     fn process_lvalue(
         &mut self,
         substitutions: &mut Substitutions,
-        lvalue: &mut SpannedLvalue<'a>,
-    ) {
-        match lvalue.extra.inner {
+        lvalue: &SpannedLvalue<'a>,
+    ) -> ValueType {
+        match lvalue.extra {
             Lvalue::Variable { ref ty } => {
-                if let Some(ty) = ty {
-                    // `ty` may contain `Any` elements, so we need to replace them with newtypes.
-                    lvalue.extra.ty = ty.extra.clone();
-                }
-                self.assign_new_type(&mut lvalue.extra.ty);
+                let mut value_type = if let Some(ty) = ty {
+                    // `ty` may contain `Any` elements, so we need to replace them with type vars.
+                    ty.extra.clone()
+                } else {
+                    ValueType::Any
+                };
+                self.assign_new_type(&mut value_type);
 
                 self.scopes
                     .last_mut()
                     .unwrap()
                     .variables
-                    .insert(lvalue.fragment, lvalue.extra.ty.clone());
+                    .insert(lvalue.fragment, value_type.clone());
+                value_type
             }
 
-            Lvalue::Tuple(ref mut fragments) => {
-                for fragment in fragments.iter_mut() {
-                    self.process_lvalue(substitutions, fragment);
-                }
-
-                // Should always match.
-                if let ValueType::Tuple(ref mut fragment_types) = lvalue.extra.ty {
-                    for (lhs, rhs) in fragment_types.iter_mut().zip(&*fragments) {
-                        *lhs = rhs.extra.ty.clone();
-                    }
-                }
-            }
+            Lvalue::Tuple(ref fragments) => ValueType::Tuple(
+                fragments
+                    .iter()
+                    .map(|fragment| self.process_lvalue(substitutions, fragment))
+                    .collect(),
+            ),
         }
     }
 
     fn process_statement(
         &mut self,
         substitutions: &mut Substitutions,
-        statement: &mut SpannedStatement<'a>,
-    ) -> Result<(), Spanned<'a, TypeError>> {
+        statement: &SpannedStatement<'a>,
+    ) -> Result<ValueType, Spanned<'a, TypeError>> {
         use self::Statement::*;
         match statement.extra {
-            Empty => Ok(()),
-            Expr(ref mut expr) => self.process_expr(substitutions, expr),
+            Empty => Ok(ValueType::Void),
+            Expr(ref expr) => self.process_expr(substitutions, expr),
 
-            Assignment {
-                ref mut lhs,
-                ref mut rhs,
-            } => {
-                self.process_expr(substitutions, rhs)?;
-                self.assign_new_type(&mut rhs.extra.ty);
-                self.process_lvalue(substitutions, lhs);
+            Assignment { ref lhs, ref rhs } => {
+                let rhs_ty = self.process_expr(substitutions, rhs)?;
+                let lhs_ty = self.process_lvalue(substitutions, lhs);
                 substitutions
-                    .unify(&lhs.extra.ty, &rhs.extra.ty)
+                    .unify(&lhs_ty, &rhs_ty)
+                    .map(|()| ValueType::Void)
                     .map_err(|e| map_span_ref(statement, e))
             }
 
             Comparison {
-                ref mut lhs,
-                ref mut rhs,
-                ..
+                ref lhs, ref rhs, ..
             } => {
-                self.process_expr(substitutions, lhs)?;
-                self.process_expr(substitutions, rhs)?;
-                self.assign_new_type(&mut lhs.extra.ty);
-                self.assign_new_type(&mut rhs.extra.ty);
+                let lhs_ty = self.process_expr(substitutions, lhs)?;
+                let rhs_ty = self.process_expr(substitutions, rhs)?;
                 substitutions
-                    .unify(&lhs.extra.ty, &rhs.extra.ty)
+                    .unify(&lhs_ty, &rhs_ty)
+                    .map(|()| ValueType::Void)
                     .map_err(|e| map_span_ref(statement, e))
             }
 
-            Fn(ref mut def) => {
+            Fn(ref def) => {
                 self.scopes.push(TypeScope::default());
-                for arg in &mut def.args {
-                    self.process_lvalue(substitutions, arg);
-                }
-                for statement in &mut def.body {
-                    self.process_statement(substitutions, statement)?;
+                let arg_types: Vec<_> = def
+                    .args
+                    .iter()
+                    .map(|arg| self.process_lvalue(substitutions, arg))
+                    .collect();
+
+                let mut return_type = ValueType::Void;
+                for (i, statement) in def.body.iter().enumerate() {
+                    let ty = self.process_statement(substitutions, statement)?;
+                    if i == def.body.len() - 1 {
+                        return_type = ty;
+                    }
                 }
                 // TODO: do we need to pop scope on error?
                 self.scopes.pop();
 
-                let return_type = match def.body.last().map(|s| &s.extra) {
-                    Some(Statement::Expr(last_expr)) => substitutions.resolve(&last_expr.extra.ty),
-                    _ => ValueType::Void,
-                };
-
-                let arg_types = def
-                    .args
+                let arg_types = arg_types
                     .iter()
-                    .map(|arg| substitutions.resolve(&arg.extra.ty))
+                    .map(|arg| substitutions.resolve(arg))
                     .collect();
+                let return_type = substitutions.resolve(&return_type);
                 let fn_ty = FnType::new(arg_types, return_type);
                 self.scopes
                     .last_mut()
                     .unwrap()
                     .functions
                     .insert(def.name.fragment, fn_ty);
-                Ok(())
+                Ok(ValueType::Void)
             }
         }
     }

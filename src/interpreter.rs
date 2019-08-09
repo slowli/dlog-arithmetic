@@ -279,7 +279,7 @@ impl<'a, G: Group> Scope<'a, G> {
         lvalue: &SpannedLvalue<'lv>,
         rvalue: Value<G>,
     ) -> Result<(), Spanned<'lv, EvalError>> {
-        match lvalue.extra.inner {
+        match lvalue.extra {
             Lvalue::Variable { ref ty } => {
                 if let Some(ref ty) = ty {
                     let actual = rvalue.ty();
@@ -392,51 +392,6 @@ impl ValueType {
             .get(index..=index)
             .map(Cow::from)
             .unwrap_or_else(|| Cow::from(format!("T{}", index - PARAM_NAMES.len())))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Typed<T> {
-    pub inner: T,
-    pub ty: ValueType,
-}
-
-impl<T> Typed<T> {
-    pub(crate) fn any(value: T) -> Self {
-        Self {
-            inner: value,
-            ty: ValueType::Any,
-        }
-    }
-
-    pub(crate) fn scalar(value: T) -> Self {
-        Self {
-            inner: value,
-            ty: ValueType::Scalar,
-        }
-    }
-
-    pub fn tuple(len: usize, value: T) -> Self {
-        Self {
-            inner: value,
-            ty: ValueType::Tuple(vec![ValueType::Any; len]),
-        }
-    }
-}
-
-impl<'a> Typed<Expr<'a>> {
-    pub(crate) fn from_literal(lit: Expr<'a>) -> Self {
-        Self {
-            ty: match lit {
-                Expr::Literal { ty, .. } => match ty {
-                    LiteralType::Buffer => ValueType::Buffer,
-                    LiteralType::Scalar => ValueType::Scalar,
-                    LiteralType::Element => ValueType::Element,
-                },
-                _ => unreachable!(),
-            },
-            inner: lit,
-        }
     }
 }
 
@@ -661,7 +616,7 @@ impl<'a, G: Group> Context<'a, G> {
         args: &[Value<G>],
         backtrace: &mut Option<Backtrace<'a>>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
-        let name = match expr.extra.inner {
+        let name = match expr.extra {
             Expr::Function { name, .. } => name,
             _ => unreachable!(),
         };
@@ -694,7 +649,7 @@ impl<'a, G: Group> Context<'a, G> {
         expr: &SpannedExpr<'a>,
         backtrace: &mut Option<Backtrace<'a>>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
-        match expr.extra.inner {
+        match expr.extra {
             Expr::Variable => self
                 .get_var(expr.fragment)
                 .cloned()

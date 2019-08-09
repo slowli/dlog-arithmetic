@@ -16,7 +16,7 @@ use nom::{
 use nom_locate::{LocatedSpan, LocatedSpanEx};
 use std::{fmt, mem};
 
-use crate::interpreter::{Typed, ValueType};
+use crate::interpreter::ValueType;
 
 #[cfg(test)]
 mod tests;
@@ -290,11 +290,9 @@ fn hex_buffer(input: Span) -> NomResult<SpannedExpr> {
         ))),
     );
 
-    with_span(map(hex_parser, |(maybe_ty, value)| {
-        Typed::from_literal(Expr::Literal {
-            ty: maybe_ty.unwrap_or(LiteralType::Buffer),
-            value,
-        })
+    with_span(map(hex_parser, |(maybe_ty, value)| Expr::Literal {
+        ty: maybe_ty.unwrap_or(LiteralType::Buffer),
+        value,
     }))(input)
 }
 
@@ -361,7 +359,7 @@ pub enum Lvalue<'a> {
 }
 
 /// `Lvalue` with the associated code span and type info.
-pub type SpannedLvalue<'a> = Spanned<'a, Typed<Lvalue<'a>>>;
+pub type SpannedLvalue<'a> = Spanned<'a, Lvalue<'a>>;
 
 fn type_info(input: Span) -> NomResult<ValueType> {
     alt((
@@ -388,7 +386,7 @@ fn lvalue(input: Span) -> NomResult<SpannedLvalue> {
                 separated_list(delimited(ws, tag_char(','), ws), lvalue),
                 preceded(ws, tag_char(')')),
             ),
-            |fragments| Typed::tuple(fragments.len(), Lvalue::Tuple(fragments)),
+            Lvalue::Tuple,
         )),
         map(
             tuple((
@@ -398,7 +396,7 @@ fn lvalue(input: Span) -> NomResult<SpannedLvalue> {
                     cut(with_span(type_info)),
                 )),
             )),
-            |(name, ty)| map_span(name, Typed::any(Lvalue::Variable { ty })),
+            |(name, ty)| map_span(name, Lvalue::Variable { ty }),
         ),
     ))(input)
 }
@@ -459,7 +457,7 @@ pub enum Expr<'a> {
 }
 
 /// `Expr` with the associated type and code span.
-pub type SpannedExpr<'a> = Spanned<'a, Typed<Expr<'a>>>;
+pub type SpannedExpr<'a> = Spanned<'a, Expr<'a>>;
 
 impl Expr<'_> {
     /// Parses expression from a string.
@@ -536,12 +534,10 @@ fn power_expr(input: Span) -> NomResult<SpannedExpr> {
             ),
             preceded(ws, simple_expr),
         )),
-        |((exponent, op), power)| {
-            Typed::any(Expr::Binary {
-                lhs: Box::new(exponent),
-                rhs: Box::new(power),
-                op: BinaryOp::from_span(op),
-            })
+        |((exponent, op), power)| Expr::Binary {
+            lhs: Box::new(exponent),
+            rhs: Box::new(power),
+            op: BinaryOp::from_span(op),
         },
     ))(input)
 }
@@ -559,28 +555,27 @@ fn paren_expr(input: Span) -> NomResult<SpannedExpr> {
         1 => Ok((rest, parsed.extra.pop().unwrap())),
         _ => {
             let terms = mem::replace(&mut parsed.extra, vec![]);
-            Ok((
-                rest,
-                map_span_ref(&parsed, Typed::tuple(terms.len(), Expr::Tuple(terms))),
-            ))
+            Ok((rest, map_span_ref(&parsed, Expr::Tuple(terms))))
         }
     })
 }
 
 fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
     alt((
-        map(var_name, |span| map_span(span, Typed::any(Expr::Variable))),
+        map(var_name, |span| map_span(span, Expr::Variable)),
         hex_buffer,
         map(with_span(string), |mut spanned_str| {
             let s = mem::replace(&mut spanned_str.extra, String::new());
-            let buffer = Expr::Literal {
-                value: s.into_bytes(),
-                ty: LiteralType::Buffer,
-            };
-            map_span(spanned_str, Typed::from_literal(buffer))
+            map_span(
+                spanned_str,
+                Expr::Literal {
+                    value: s.into_bytes(),
+                    ty: LiteralType::Buffer,
+                },
+            )
         }),
         map(take_while1(|c: char| c.is_ascii_digit()), |span| {
-            map_span(span, Typed::scalar(Expr::Number))
+            map_span(span, Expr::Number)
         }),
         map(
             with_span(tuple((terminated(tag_char('-'), ws), expr))),
@@ -590,20 +585,20 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
                     offset: spanned.offset,
                     line: spanned.line,
                     fragment: spanned.fragment,
-                    extra: Typed::any(Expr::Neg(Box::new(inner))),
+                    extra: Expr::Neg(Box::new(inner)),
                 }
             },
         ),
         map(with_span(fun), |mut spanned| {
             let name = spanned.extra.0;
             let args = mem::replace(&mut spanned.extra.1, vec![]);
-            map_span(spanned, Typed::any(Expr::Function { name, args }))
+            map_span(spanned, Expr::Function { name, args })
         }),
         paren_expr,
         power_expr,
         map(with_span(block), |mut spanned| {
             let statements = mem::replace(&mut spanned.extra, vec![]);
-            map_span(spanned, Typed::any(Expr::Block(statements)))
+            map_span(spanned, Expr::Block(statements))
         }),
     ))(input)
 }
@@ -620,11 +615,11 @@ fn high_priority_expr(input: Span) -> NomResult<SpannedExpr> {
         rest.into_iter().fold(first, |acc, (op, expr)| {
             map_span(
                 unite_spans(input, &acc, &expr),
-                Typed::any(Expr::Binary {
+                Expr::Binary {
                     lhs: Box::new(acc),
                     op: BinaryOp::from_span(op),
                     rhs: Box::new(expr),
-                }),
+                },
             )
         })
     });
@@ -644,11 +639,11 @@ fn expr(input: Span) -> NomResult<SpannedExpr> {
         rest.into_iter().fold(first, |acc, (op, expr)| {
             map_span(
                 unite_spans(input, &acc, &expr),
-                Typed::any(Expr::Binary {
+                Expr::Binary {
                     lhs: Box::new(acc),
                     op: BinaryOp::from_span(op),
                     rhs: Box::new(expr),
-                }),
+                },
             )
         })
     });

@@ -286,7 +286,7 @@ impl<'a, G: Group> Function<'a, G> {
 }
 
 fn set_local_vars<'lv>(local_vars: &mut HashSet<&'lv str>, lvalue: &SpannedLvalue<'lv>) {
-    match lvalue.extra.inner {
+    match lvalue.extra {
         Lvalue::Variable { .. } => {
             if lvalue.fragment != "_" {
                 local_vars.insert(lvalue.fragment);
@@ -306,7 +306,7 @@ fn process_vars<'a, G: Group>(
     expr: &SpannedExpr<'a>,
     context: &Context<'a, G>,
 ) -> Result<(), Spanned<'a, EvalError>> {
-    match expr.extra.inner {
+    match expr.extra {
         Expr::Variable => {
             let var_name = expr.fragment;
             if local_vars.contains(var_name) || captures.contains_var(var_name) {

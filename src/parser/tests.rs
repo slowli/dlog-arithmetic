@@ -13,20 +13,11 @@ fn span(offset: usize, fragment: &str) -> Span {
 }
 
 fn sp<'a>(offset: usize, fragment: &'a str, expr: Expr<'a>) -> SpannedExpr<'a> {
-    let typed_expr = match expr {
-        Expr::Literal { .. } => Typed::from_literal(expr),
-        Expr::Number => Typed::scalar(expr),
-        _ => Typed::any(expr),
-    };
-    map_span(span(offset, fragment), typed_expr)
+    map_span(span(offset, fragment), expr)
 }
 
 fn lsp<'a>(offset: usize, fragment: &'a str, lvalue: Lvalue<'a>) -> SpannedLvalue<'a> {
-    let typed = match lvalue {
-        Lvalue::Variable { .. } => Typed::any(lvalue),
-        Lvalue::Tuple(ref fragments) => Typed::tuple(fragments.len(), lvalue),
-    };
-    map_span(span(offset, fragment), typed)
+    map_span(span(offset, fragment), lvalue)
 }
 
 #[test]
@@ -185,7 +176,7 @@ fn fun_works() {
 fn power_expr_works() {
     let input = Span::new("[x]G");
     assert_eq!(
-        power_expr(input).unwrap().1.extra.inner,
+        power_expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(1, "x", Expr::Variable)),
             op: BinaryOp::from_span(span(2, "]")),
@@ -195,7 +186,7 @@ fn power_expr_works() {
 
     let input = Span::new("[x]G + C");
     assert_eq!(
-        power_expr(input).unwrap().1.extra.inner,
+        power_expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(1, "x", Expr::Variable)),
             op: BinaryOp::from_span(span(2, "]")),
@@ -205,7 +196,7 @@ fn power_expr_works() {
 
     let input = Span::new("[x](G + C)");
     assert_eq!(
-        power_expr(input).unwrap().1.extra.inner,
+        power_expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(1, "x", Expr::Variable)),
             op: BinaryOp::from_span(span(2, "]")),
@@ -223,7 +214,7 @@ fn power_expr_works() {
 
     let input = Span::new("[x + :sc(5) + 3]G");
     assert_matches!(
-        power_expr(input).unwrap().1.extra.inner,
+        power_expr(input).unwrap().1.extra,
         Expr::Binary {
             ref lhs,
             ref rhs,
@@ -239,7 +230,7 @@ fn element_expr_works() {
 
     let input = Span::new("(:ge(0x1234));");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Function {
             name: span(1, ":ge"),
             args: vec![sp(
@@ -255,7 +246,7 @@ fn element_expr_works() {
 
     let input = Span::new(":ge(0x1234) + A_b;");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(0, ":ge(0x1234)", {
                 Expr::Function {
@@ -277,7 +268,7 @@ fn element_expr_works() {
 
     let input = Span::new(":ge(0x1234) + A_b - C;");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(0, ":ge(0x1234) + A_b", {
                 Expr::Binary {
@@ -307,7 +298,7 @@ fn element_expr_works() {
 
     let input = Span::new("(:ge(0x1234) + A_b) - (C + :ge(0x00) + D);");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(1, ":ge(0x1234) + A_b", {
                 Expr::Binary {
@@ -368,19 +359,19 @@ fn element_expr_works() {
 fn negating_expr_works() {
     let input = Span::new("-3;");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Neg(Box::new(sp(1, "3", Expr::Number)))
     );
 
     let input = Span::new("-x;");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Neg(Box::new(sp(1, "x", Expr::Variable)))
     );
 
     let input = Span::new("-(x + y);");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Neg(Box::new(sp(
             2,
             "x + y",
@@ -394,7 +385,7 @@ fn negating_expr_works() {
 
     let input = Span::new("2 * -3;");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(0, "2", Expr::Number)),
             op: BinaryOp::from_span(span(2, "*")),
@@ -407,7 +398,7 @@ fn negating_expr_works() {
 fn expr_with_numbers_works() {
     let input = Span::new("(2 + a) * b;");
     assert_eq!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary {
             lhs: Box::new(sp(1, "2 + a", {
                 Expr::Binary {
@@ -557,15 +548,12 @@ fn tuples_are_parsed() {
     let input = Span::new("(x, y)");
     assert_eq!(
         paren_expr(input).unwrap().1.extra,
-        Typed {
-            inner: Expr::Tuple(vec![sp(1, "x", Expr::Variable), sp(4, "y", Expr::Variable)]),
-            ty: ValueType::Tuple(vec![ValueType::Any; 2]),
-        }
+        Expr::Tuple(vec![sp(1, "x", Expr::Variable), sp(4, "y", Expr::Variable)])
     );
 
     let input = Span::new("(x / 2, [y]G, 1)");
     assert_eq!(
-        paren_expr(input).unwrap().1.extra.inner,
+        paren_expr(input).unwrap().1.extra,
         Expr::Tuple(vec![
             sp(
                 1,
@@ -595,31 +583,28 @@ fn lvalues_are_parsed() {
     let input = Span::new("x =");
     assert_eq!(
         lvalue(input).unwrap().1.extra,
-        Typed::any(Lvalue::Variable { ty: None })
+        Lvalue::Variable { ty: None }
     );
 
     let input = Span::new("(x, (y, z)) =");
     assert_eq!(
         lvalue(input).unwrap().1.extra,
-        Typed::tuple(
-            2,
-            Lvalue::Tuple(vec![
-                lsp(1, "x", Lvalue::Variable { ty: None }),
-                lsp(
-                    4,
-                    "(y, z)",
-                    Lvalue::Tuple(vec![
-                        lsp(5, "y", Lvalue::Variable { ty: None }),
-                        lsp(8, "z", Lvalue::Variable { ty: None }),
-                    ])
-                )
-            ])
-        )
+        Lvalue::Tuple(vec![
+            lsp(1, "x", Lvalue::Variable { ty: None }),
+            lsp(
+                4,
+                "(y, z)",
+                Lvalue::Tuple(vec![
+                    lsp(5, "y", Lvalue::Variable { ty: None }),
+                    lsp(8, "z", Lvalue::Variable { ty: None }),
+                ])
+            )
+        ])
     );
 
     let input = Span::new("(x: (Sc, _), (y, z: Ge)) =");
     assert_eq!(
-        lvalue(input).unwrap().1.extra.inner,
+        lvalue(input).unwrap().1.extra,
         Lvalue::Tuple(vec![
             lsp(
                 1,
@@ -653,25 +638,25 @@ fn lvalues_are_parsed() {
 fn expr_evaluation_order() {
     let input = Span::new("1 - 2 + 3 - 4;");
     assert_matches!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary { op, .. } if op == BinaryOp::from_span(span(10, "-"))
     );
 
     let input = Span::new("1 / 2 * 3 / 4;");
     assert_matches!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary { op, .. } if op == BinaryOp::from_span(span(10, "/"))
     );
 
     let input = Span::new("1 - 2 * 3 - 4;");
     assert_matches!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary { op, .. } if op == BinaryOp::from_span(span(10, "-"))
     );
 
     let input = Span::new("X - [2]G + y * Z;");
     assert_matches!(
-        expr(input).unwrap().1.extra.inner,
+        expr(input).unwrap().1.extra,
         Expr::Binary { op, .. } if op == BinaryOp::from_span(span(9, "+"))
     );
 }
