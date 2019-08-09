@@ -1,3 +1,4 @@
+use failure_derive::*;
 use std::{collections::HashMap, fmt};
 
 use crate::{
@@ -10,14 +11,46 @@ use crate::{
     Group,
 };
 
-#[derive(Debug)]
+/// Errors that can occur during type inference.
+#[derive(Debug, Clone, Fail)]
 pub enum TypeError {
-    TupleLenMismatch { expected: usize, actual: usize },
+    /// Trying to unify tuples of different sizes.
+    #[fail(
+        display = "A tuple with {} elements cannot be unified with a tuple with {} elements",
+        _0, _1
+    )]
+    TupleLenMismatch(usize, usize),
+
+    /// Trying to unify incompatible types.
+    #[fail(display = "Trying to unify incompatible types `{}` and `{}`", _0, _1)]
     IncompatibleTypes(ValueType, ValueType),
+
+    /// Undefined variable occurrence.
+    #[fail(display = "Variable `{}` is not defined", _0)]
     UndefinedVar(String),
+
+    /// Undefined function occurrence.
+    #[fail(display = "Function `{}` is not defined", _0)]
     UndefinedFn(String),
-    ArgLenMismatch { expected: usize, actual: usize },
-    RecursiveType,
+
+    /// Mismatch between the number of args in the function definition and call.
+    #[fail(
+        display = "Function expects {} args, but is called with {} args",
+        expected, actual
+    )]
+    ArgLenMismatch {
+        /// Number of args in function definition.
+        expected: usize,
+        /// Number of args supplied in the call.
+        actual: usize,
+    },
+
+    /// Trying to unify a type with a type containing it.
+    #[fail(
+        display = "Trying to unify a type `T` with a type containing it: {}",
+        _0
+    )]
+    RecursiveType(ValueType),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,10 +93,7 @@ impl Substitutions {
 
             (Tuple(ref types_l), Tuple(ref types_r)) => {
                 if types_l.len() != types_r.len() {
-                    return Err(TypeError::TupleLenMismatch {
-                        expected: types_l.len(),
-                        actual: types_r.len(),
-                    });
+                    return Err(TypeError::TupleLenMismatch(types_l.len(), types_r.len()));
                 }
                 for (type_l, type_r) in types_l.iter().zip(types_r) {
                     self.unify(type_l, type_r)?;
@@ -94,6 +124,20 @@ impl Substitutions {
         }
     }
 
+    fn sanitize_type(&self, fixed_idx: usize, ty: &ValueType) -> ValueType {
+        match self.resolve(ty) {
+            ValueType::TypeVar(i) if i == fixed_idx => ValueType::TypeVar(0),
+            ValueType::TypeVar(_) => ValueType::Any,
+            ValueType::Tuple(ref fragments) => ValueType::Tuple(
+                fragments
+                    .iter()
+                    .map(|fragment| self.sanitize_type(fixed_idx, fragment))
+                    .collect(),
+            ),
+            simple_ty => simple_ty.clone(),
+        }
+    }
+
     fn unify_var(&mut self, var_idx: usize, ty: &ValueType) -> Result<(), TypeError> {
         if let Some(subst) = self.eqs.get(&var_idx).cloned() {
             return self.unify(&subst, ty);
@@ -105,7 +149,7 @@ impl Substitutions {
         }
 
         if self.check_occurrence(var_idx, ty) {
-            Err(TypeError::RecursiveType)
+            Err(TypeError::RecursiveType(self.sanitize_type(var_idx, ty)))
         } else {
             self.eqs.insert(var_idx, ty.clone());
             Ok(())
@@ -119,7 +163,8 @@ struct TypeScope<'a> {
     functions: HashMap<&'a str, FnType>,
 }
 
-struct TypeContext<'a, G: Group> {
+/// Context for deriving type information.
+pub struct TypeContext<'a, G: Group> {
     count: usize,
     outer: &'a Context<'a, G>,
     scopes: Vec<TypeScope<'a>>,
@@ -142,7 +187,8 @@ struct TypeEquation {
 }
 
 impl<'a, G: Group> TypeContext<'a, G> {
-    fn new(context: &'a Context<'a, G>) -> Self {
+    /// Creates a type context based on the interpreter context.
+    pub fn new(context: &'a Context<'a, G>) -> Self {
         TypeContext {
             count: 0,
             outer: context,
@@ -150,7 +196,8 @@ impl<'a, G: Group> TypeContext<'a, G> {
         }
     }
 
-    fn get_var_type(&self, name: &str) -> Option<ValueType> {
+    /// Gets type of the specified variable.
+    pub fn get_var_type(&self, name: &str) -> Option<ValueType> {
         self.scopes
             .iter()
             .rev()
@@ -159,6 +206,7 @@ impl<'a, G: Group> TypeContext<'a, G> {
             .or_else(|| self.outer.get_var(name).map(Value::ty))
     }
 
+    /// Gets type of the specified function.
     fn get_fn_type(&self, name: &str) -> Option<&FnType> {
         self.scopes
             .iter()
@@ -244,7 +292,7 @@ impl<'a, G: Group> TypeContext<'a, G> {
                         return_type = ty;
                     }
                 }
-                // TODO: do we need to pop scope on error?
+                // TODO: do we need to pop a scope on error?
                 self.scopes.pop();
                 // The type returned by the block is equal to the type of the last statement.
                 Ok(return_type)
@@ -400,7 +448,7 @@ impl<'a, G: Group> TypeContext<'a, G> {
                         return_type = ty;
                     }
                 }
-                // TODO: do we need to pop scope on error?
+                // TODO: do we need to pop a scope on error?
                 self.scopes.pop();
 
                 let arg_types = arg_types
@@ -419,6 +467,8 @@ impl<'a, G: Group> TypeContext<'a, G> {
         }
     }
 
+    /// Processes statements. After processing, the context will contain type info
+    /// about newly declared vars / functions.
     pub fn process_statements(
         &mut self,
         statements: &mut [SpannedStatement<'a>],
@@ -525,7 +575,7 @@ mod tests {
         let mut types = TypeContext::new(&context);
         let err = types.process_statements(&mut statements).unwrap_err();
         assert_eq!(err.fragment, "x + (x, G)");
-        assert_matches!(err.extra, TypeError::RecursiveType);
+        assert_matches!(err.extra, TypeError::RecursiveType(ref ty) if ty.to_string() == "(T, Ge)");
 
         let mut code = r#"
             fn add(x, y) { x + y } # this function is fine
@@ -537,7 +587,7 @@ mod tests {
         let mut statements = Statement::parse_list(Span::new(&code)).unwrap();
         let mut types = TypeContext::new(&context);
         let err = types.process_statements(&mut statements).unwrap_err();
-        assert_matches!(err.extra, TypeError::RecursiveType);
+        assert_matches!(err.extra, TypeError::RecursiveType(ref ty) if ty.to_string() == "(Sc, T)");
     }
 
     #[test]

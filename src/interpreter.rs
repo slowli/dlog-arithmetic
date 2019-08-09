@@ -338,9 +338,7 @@ pub enum ValueType {
     Buffer,
     /// Tuple.
     Tuple(Vec<ValueType>),
-
-    // Used during type inference.
-    #[doc(hidden)]
+    /// Type variable.
     TypeVar(usize),
 }
 

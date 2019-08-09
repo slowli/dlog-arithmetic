@@ -82,4 +82,5 @@ pub use crate::{
         Backtrace, BacktraceElement, Code, Context, ErrorWithBacktrace, EvalError, Scope, Value,
         ValueType,
     },
+    type_inference::{TypeContext, TypeError},
 };
