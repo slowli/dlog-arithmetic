@@ -6,7 +6,7 @@ use nom::{
         complete::{escaped_transform, is_not, tag, take_while, take_while1, take_while_m_n},
         streaming,
     },
-    character::complete::char as tag_char,
+    character::complete::{char as tag_char, one_of},
     combinator::{cut, map, map_res, opt, peek, recognize},
     error::{context, ErrorKind},
     multi::{fold_many1, many0, separated_list},
@@ -523,6 +523,14 @@ impl BinaryOp {
             },
         }
     }
+
+    fn priority(self) -> usize {
+        match self {
+            BinaryOp::Add | BinaryOp::Sub => 0,
+            BinaryOp::Mul | BinaryOp::Div => 1,
+            BinaryOp::Power => 2,
+        }
+    }
 }
 
 fn power_expr(input: Span) -> NomResult<SpannedExpr> {
@@ -603,55 +611,67 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
     ))(input)
 }
 
-fn high_priority_expr(input: Span) -> NomResult<SpannedExpr> {
-    let high_priority_parser = tuple((
+fn binary_expr(input: Span) -> NomResult<SpannedExpr> {
+    let binary_ops = with_span(map(one_of("+-*/"), drop));
+    let binary_parser = tuple((
         simple_expr,
-        many0(tuple((
-            delimited(ws, alt((tag("*"), tag("/"))), ws),
-            simple_expr,
-        ))),
+        many0(tuple((delimited(ws, binary_ops, ws), simple_expr))),
     ));
-    let high_priority_parser = map(high_priority_parser, |(first, rest)| {
-        rest.into_iter().fold(first, |acc, (op, expr)| {
-            map_span(
-                unite_spans(input, &acc, &expr),
-                Expr::Binary {
-                    lhs: Box::new(acc),
-                    op: BinaryOp::from_span(op),
-                    rhs: Box::new(expr),
-                },
-            )
-        })
-    });
+    map(binary_parser, |(first, rest)| {
+        let mut right_contour: Vec<BinaryOp> = vec![];
+        rest.into_iter().fold(first, |mut acc, (op, expr)| {
+            let new_op = BinaryOp::from_span(op);
+            let united_span = unite_spans(input, &acc, &expr);
 
-    alt((high_priority_parser, simple_expr))(input)
+            let insert_pos = right_contour
+                .iter()
+                .position(|past_op| past_op.priority() >= new_op.extra.priority())
+                .unwrap_or_else(|| right_contour.len());
+
+            if insert_pos == 0 {
+                right_contour.clear();
+                right_contour.push(new_op.extra);
+
+                map_span(
+                    united_span,
+                    Expr::Binary {
+                        lhs: Box::new(acc),
+                        op: new_op,
+                        rhs: Box::new(expr),
+                    },
+                )
+            } else {
+                right_contour.truncate(insert_pos - 1);
+                right_contour.push(new_op.extra);
+
+                let mut parent = &mut acc;
+                for _ in 1..insert_pos {
+                    parent = match parent.extra {
+                        Expr::Binary { ref mut rhs, .. } => rhs,
+                        _ => unreachable!(),
+                    };
+                }
+
+                if let Expr::Binary { ref mut rhs, .. } = parent.extra {
+                    let rhs_span = unite_spans(input, rhs, &expr);
+                    let dummy = Box::new(map_span_ref(rhs, Expr::Variable));
+                    let old_rhs = mem::replace(rhs, dummy);
+                    let new_expr = Expr::Binary {
+                        lhs: old_rhs,
+                        op: new_op,
+                        rhs: Box::new(expr),
+                    };
+                    *rhs = Box::new(map_span(rhs_span, new_expr));
+                }
+                acc.fragment = united_span.fragment;
+                acc
+            }
+        })
+    })(input)
 }
 
 fn expr(input: Span) -> NomResult<SpannedExpr> {
-    let low_priority_parser = tuple((
-        high_priority_expr,
-        many0(tuple((
-            delimited(ws, alt((tag("+"), tag("-"))), ws),
-            high_priority_expr,
-        ))),
-    ));
-    let low_priority_parser = map(low_priority_parser, |(first, rest)| {
-        rest.into_iter().fold(first, |acc, (op, expr)| {
-            map_span(
-                unite_spans(input, &acc, &expr),
-                Expr::Binary {
-                    lhs: Box::new(acc),
-                    op: BinaryOp::from_span(op),
-                    rhs: Box::new(expr),
-                },
-            )
-        })
-    });
-
-    context(
-        Context::Expr.to_str(),
-        alt((low_priority_parser, high_priority_expr, simple_expr)),
-    )(input)
+    context(Context::Expr.to_str(), binary_expr)(input)
 }
 
 /// Statement.
