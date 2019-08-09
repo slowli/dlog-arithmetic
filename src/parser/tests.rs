@@ -22,7 +22,11 @@ fn sp<'a>(offset: usize, fragment: &'a str, expr: Expr<'a>) -> SpannedExpr<'a> {
 }
 
 fn lsp<'a>(offset: usize, fragment: &'a str, lvalue: Lvalue<'a>) -> SpannedLvalue<'a> {
-    map_span(span(offset, fragment), lvalue)
+    let typed = match lvalue {
+        Lvalue::Variable { .. } => Typed::any(lvalue),
+        Lvalue::Tuple(ref fragments) => Typed::tuple(fragments.len(), lvalue),
+    };
+    map_span(span(offset, fragment), typed)
 }
 
 #[test]
@@ -591,28 +595,31 @@ fn lvalues_are_parsed() {
     let input = Span::new("x =");
     assert_eq!(
         lvalue(input).unwrap().1.extra,
-        Lvalue::Variable { ty: None }
+        Typed::any(Lvalue::Variable { ty: None })
     );
 
     let input = Span::new("(x, (y, z)) =");
     assert_eq!(
         lvalue(input).unwrap().1.extra,
-        Lvalue::Tuple(vec![
-            lsp(1, "x", Lvalue::Variable { ty: None }),
-            lsp(
-                4,
-                "(y, z)",
-                Lvalue::Tuple(vec![
-                    lsp(5, "y", Lvalue::Variable { ty: None }),
-                    lsp(8, "z", Lvalue::Variable { ty: None }),
-                ])
-            )
-        ])
+        Typed::tuple(
+            2,
+            Lvalue::Tuple(vec![
+                lsp(1, "x", Lvalue::Variable { ty: None }),
+                lsp(
+                    4,
+                    "(y, z)",
+                    Lvalue::Tuple(vec![
+                        lsp(5, "y", Lvalue::Variable { ty: None }),
+                        lsp(8, "z", Lvalue::Variable { ty: None }),
+                    ])
+                )
+            ])
+        )
     );
 
     let input = Span::new("(x: (Sc, _), (y, z: Ge)) =");
     assert_eq!(
-        lvalue(input).unwrap().1.extra,
+        lvalue(input).unwrap().1.extra.inner,
         Lvalue::Tuple(vec![
             lsp(
                 1,

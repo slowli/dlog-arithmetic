@@ -4,7 +4,12 @@ use curve25519::scalar::Scalar;
 use failure::Error;
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
-use std::{cell::RefCell, collections::HashSet, fmt, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    fmt,
+    rc::Rc,
+};
 
 use crate::{
     groups::Ed25519,
@@ -22,17 +27,57 @@ pub struct FnType {
     pub args: FnArgs,
     /// Type of the value returned by the function.
     pub return_type: ValueType,
+    /// Number of type parameters.
+    pub type_count: usize,
 }
 
 impl fmt::Display for FnType {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "fn({})", self.args)?;
+        formatter.write_str("fn")?;
+        if self.type_count > 0 {
+            formatter.write_str("<")?;
+            for i in 0..self.type_count {
+                formatter.write_str(ValueType::type_param(i).as_ref())?;
+                if i + 1 < self.type_count {
+                    formatter.write_str(", ")?;
+                }
+            }
+            formatter.write_str(">")?;
+        }
+        write!(formatter, "({})", self.args)?;
         if let ValueType::Void = self.return_type {
             // We need to use `if let` rather than comparison to handle `return_type == Any`.
         } else {
             write!(formatter, " -> {}", self.return_type)?;
         }
         Ok(())
+    }
+}
+
+impl FnType {
+    pub(crate) fn new(mut args: Vec<ValueType>, mut return_type: ValueType) -> Self {
+        let mut reduced = HashMap::new();
+        for ty in args.iter_mut().chain(Some(&mut return_type)) {
+            reduce(&mut reduced, ty);
+        }
+
+        fn reduce(reductions: &mut HashMap<usize, usize>, ty: &mut ValueType) {
+            let len = reductions.len();
+            if let ValueType::TypeVar(idx) = ty {
+                let reduced_idx = *reductions.entry(*idx).or_insert(len);
+                *ty = ValueType::TypeVar(reduced_idx);
+            } else if let ValueType::Tuple(ref mut fragments) = ty {
+                for fragment in fragments {
+                    reduce(reductions, fragment);
+                }
+            }
+        }
+
+        Self {
+            args: FnArgs::List(args),
+            return_type,
+            type_count: reduced.len(),
+        }
     }
 }
 
@@ -79,6 +124,7 @@ impl NativeFn<Ed25519> for FromSha512 {
         FnType {
             args: FnArgs::Any,
             return_type: ValueType::Scalar,
+            type_count: 0,
         }
     }
 
@@ -121,6 +167,7 @@ impl<R: CryptoRng + RngCore> NativeFn<Ed25519> for Rand<R> {
         FnType {
             args: FnArgs::List(vec![]),
             return_type: ValueType::Scalar,
+            type_count: 0,
         }
     }
 
@@ -168,7 +215,7 @@ impl<'a, G: Group> InterpretedFn<'a, G> {
             process_vars_in_statement(&mut captures, &mut local_vars, statement, context)?;
         }
 
-        // FIXME: use Hindley-Miller type inference
+        // FIXME: use Hindley-Milner type inference
         let ty = FnType {
             args: FnArgs::List(
                 (0..definition.extra.args.len())
@@ -176,6 +223,7 @@ impl<'a, G: Group> InterpretedFn<'a, G> {
                     .collect(),
             ),
             return_type: ValueType::Any,
+            type_count: 0,
         };
 
         Ok(Self {
@@ -238,7 +286,7 @@ impl<'a, G: Group> Function<'a, G> {
 }
 
 fn set_local_vars<'lv>(local_vars: &mut HashSet<&'lv str>, lvalue: &SpannedLvalue<'lv>) {
-    match lvalue.extra {
+    match lvalue.extra.inner {
         Lvalue::Variable { .. } => {
             if lvalue.fragment != "_" {
                 local_vars.insert(lvalue.fragment);

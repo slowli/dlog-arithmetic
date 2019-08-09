@@ -21,7 +21,7 @@
 //!
 //! // Language snippet. Syntax is essentially a mix of Python and Rust.
 //! let mut code = r#"
-//!     ## Comments start with a hash `#`.
+//!     ## Comments start with a hash sign `#`.
 //!     x = 12345; # `x` is a *scalar* (member of the `Z/nZ` group).
 //!     X = [x]G;  # `X` is a group element obtained by adding the basepoint to itself `x` times.
 //!     X ?= x * G; # `x * G` is another way to write multiplication by a scalar;
@@ -59,6 +59,7 @@
 //!     }
 //!     :ed25519_sign(x, "Hello, world!")
 //! "#.to_owned();
+//! // Snippets should be ended with EOF in order to be recognized as complete.
 //! code.push('\0');
 //!
 //! let statements = Statement::parse_list(Span::new(&code)).unwrap();
@@ -73,6 +74,7 @@ pub mod functions;
 mod groups;
 mod interpreter;
 pub mod parser;
+mod type_inference;
 
 pub use crate::{
     groups::{Ed25519, Group},

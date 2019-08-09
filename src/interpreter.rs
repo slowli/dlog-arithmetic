@@ -1,5 +1,5 @@
 use failure_derive::*;
-use std::{collections::HashMap, fmt, ops, rc::Rc};
+use std::{borrow::Cow, collections::HashMap, fmt, ops, rc::Rc};
 use typed_arena::Arena;
 
 use crate::{
@@ -279,7 +279,7 @@ impl<'a, G: Group> Scope<'a, G> {
         lvalue: &SpannedLvalue<'lv>,
         rvalue: Value<G>,
     ) -> Result<(), Spanned<'lv, EvalError>> {
-        match lvalue.extra {
+        match lvalue.extra.inner {
             Lvalue::Variable { ref ty } => {
                 if let Some(ref ty) = ty {
                     let actual = rvalue.ty();
@@ -338,6 +338,10 @@ pub enum ValueType {
     Buffer,
     /// Tuple.
     Tuple(Vec<ValueType>),
+
+    // Used during type inference.
+    #[doc(hidden)]
+    TypeVar(usize),
 }
 
 impl PartialEq for ValueType {
@@ -351,6 +355,7 @@ impl PartialEq for ValueType {
             | (Element, Element)
             | (Buffer, Buffer) => true,
 
+            (TypeVar(x), TypeVar(y)) => x == y,
             (Tuple(xs), Tuple(ys)) => xs == ys,
             _ => false,
         }
@@ -362,9 +367,10 @@ impl fmt::Display for ValueType {
         match self {
             ValueType::Void => formatter.write_str("void"),
             ValueType::Any => formatter.write_str("_"),
+            ValueType::TypeVar(idx) => formatter.write_str(Self::type_param(*idx).as_ref()),
             ValueType::Scalar => formatter.write_str("Sc"),
             ValueType::Element => formatter.write_str("Ge"),
-            ValueType::Buffer => formatter.write_str("bytes"),
+            ValueType::Buffer => formatter.write_str("Bytes"),
             ValueType::Tuple(fragments) => {
                 formatter.write_str("(")?;
                 for (i, frag) in fragments.iter().enumerate() {
@@ -376,6 +382,16 @@ impl fmt::Display for ValueType {
                 formatter.write_str(")")
             }
         }
+    }
+}
+
+impl ValueType {
+    pub(crate) fn type_param(index: usize) -> Cow<'static, str> {
+        const PARAM_NAMES: &str = "TUVXYZ";
+        PARAM_NAMES
+            .get(index..=index)
+            .map(Cow::from)
+            .unwrap_or_else(|| Cow::from(format!("T{}", index - PARAM_NAMES.len())))
     }
 }
 
@@ -925,6 +941,7 @@ mod tests {
         let ty = FnType {
             args: FnArgs::Any,
             return_type: ValueType::Scalar,
+            type_count: 0,
         };
         assert_eq!(ty.to_string(), "fn(...) -> Sc");
 
@@ -934,6 +951,7 @@ mod tests {
                 ValueType::Tuple(vec![ValueType::Scalar, ValueType::Scalar]),
             ]),
             return_type: ValueType::Element,
+            type_count: 0,
         };
         assert_eq!(ty.to_string(), "fn(Ge, (Sc, Sc)) -> Ge");
 
@@ -943,8 +961,19 @@ mod tests {
                 ValueType::Tuple(vec![ValueType::Scalar, ValueType::Scalar]),
             ]),
             return_type: ValueType::Void,
+            type_count: 0,
         };
         assert_eq!(ty.to_string(), "fn(Ge, (Sc, Sc))");
+
+        let ty = FnType {
+            args: FnArgs::List(vec![
+                ValueType::Element,
+                ValueType::Tuple(vec![ValueType::TypeVar(0), ValueType::TypeVar(1)]),
+            ]),
+            return_type: ValueType::TypeVar(0),
+            type_count: 2,
+        };
+        assert_eq!(ty.to_string(), "fn<T, U>(Ge, (T, U)) -> T");
     }
 
     #[test]

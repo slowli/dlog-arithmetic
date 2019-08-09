@@ -360,8 +360,8 @@ pub enum Lvalue<'a> {
     Tuple(Vec<SpannedLvalue<'a>>),
 }
 
-/// `Lvalue` with the associated code span.
-pub type SpannedLvalue<'a> = Spanned<'a, Lvalue<'a>>;
+/// `Lvalue` with the associated code span and type info.
+pub type SpannedLvalue<'a> = Spanned<'a, Typed<Lvalue<'a>>>;
 
 fn type_info(input: Span) -> NomResult<ValueType> {
     alt((
@@ -388,7 +388,7 @@ fn lvalue(input: Span) -> NomResult<SpannedLvalue> {
                 separated_list(delimited(ws, tag_char(','), ws), lvalue),
                 preceded(ws, tag_char(')')),
             ),
-            Lvalue::Tuple,
+            |fragments| Typed::tuple(fragments.len(), Lvalue::Tuple(fragments)),
         )),
         map(
             tuple((
@@ -398,7 +398,7 @@ fn lvalue(input: Span) -> NomResult<SpannedLvalue> {
                     cut(with_span(type_info)),
                 )),
             )),
-            |(name, ty)| map_span(name, Lvalue::Variable { ty }),
+            |(name, ty)| map_span(name, Typed::any(Lvalue::Variable { ty })),
         ),
     ))(input)
 }
