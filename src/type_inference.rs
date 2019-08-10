@@ -1,12 +1,15 @@
 use failure_derive::*;
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use crate::{
     functions::{FnArgs, FnType, Function},
     interpreter::{Context, Value, ValueType},
     parser::{
         create_span_ref, BinaryOp, Expr, FnDefinition, LiteralType, Lvalue, Spanned, SpannedExpr,
-        SpannedLvalue, SpannedStatement, Statement,
+        SpannedLvalue, SpannedStatement, Statement, UnaryOp,
     },
     Group,
 };
@@ -52,6 +55,10 @@ pub enum TypeError {
     )]
     RecursiveType(ValueType),
 
+    /// Non-linear type.
+    #[fail(display = "Non-linear type: {}", _0)]
+    NonLinearType(ValueType),
+
     /// Function definition within a function, which is not yet supported.
     #[fail(display = "Embedded functions are not yet supported")]
     EmbeddedFunction,
@@ -60,6 +67,7 @@ pub enum TypeError {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Substitutions {
     eqs: HashMap<usize, ValueType>,
+    lin: HashSet<usize>,
 }
 
 impl Substitutions {
@@ -155,8 +163,39 @@ impl Substitutions {
         if self.check_occurrence(var_idx, ty) {
             Err(TypeError::RecursiveType(self.sanitize_type(var_idx, ty)))
         } else {
+            if self.lin.contains(&var_idx) {
+                self.mark_as_linear(ty)?;
+            }
             self.eqs.insert(var_idx, ty.clone());
             Ok(())
+        }
+    }
+
+    fn mark_as_linear(&mut self, ty: &ValueType) -> Result<(), TypeError> {
+        match ty {
+            ValueType::TypeVar(idx) => {
+                self.lin.insert(*idx);
+                if let Some(subst) = self.eqs.get(idx).cloned() {
+                    self.mark_as_linear(&subst)
+                } else {
+                    Ok(())
+                }
+            }
+            ValueType::Any => unreachable!(),
+
+            ValueType::Bool | ValueType::Buffer => Err(TypeError::NonLinearType(ty.clone())),
+            ValueType::Scalar | ValueType::Element | ValueType::Void => {
+                // These types are linear.
+                Ok(())
+            }
+
+            ValueType::Tuple(ref fragments) => {
+                for fragment in fragments {
+                    self.mark_as_linear(fragment)
+                        .map_err(|_| TypeError::NonLinearType(ty.clone()))?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -296,6 +335,16 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
                     }
                 }
                 let return_type = self.instantiate_type(&fn_ty.return_type);
+
+                // Copy constraints on the newly generated type vars from the function definition.
+                for i in 0..fn_ty.type_count {
+                    if fn_ty.is_linear(i) {
+                        substitutions
+                            .mark_as_linear(&ValueType::TypeVar(self.count + i))
+                            .map_err(|e| create_span_ref(&args[i], e))?;
+                    }
+                }
+
                 self.count += fn_ty.type_count;
                 Ok(return_type)
             }
@@ -315,7 +364,17 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
                 Ok(return_type)
             }
 
-            Neg(ref inner) => self.process_expr_inner(substitutions, inner),
+            Unary { op, ref inner } => match op.extra {
+                UnaryOp::Not => {
+                    let inner_type = self.process_expr_inner(substitutions, inner)?;
+                    substitutions
+                        .unify(&inner_type, &ValueType::Bool)
+                        .map_err(|e| create_span_ref(expr, e))?;
+                    Ok(ValueType::Bool)
+                }
+                UnaryOp::Neg => self.process_expr_inner(substitutions, inner),
+            },
+
             Binary {
                 ref lhs,
                 ref rhs,
@@ -328,6 +387,7 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
                     BinaryOp::Add | BinaryOp::Sub => {
                         substitutions
                             .unify(&lhs_ty, &rhs_ty)
+                            .and_then(|()| substitutions.mark_as_linear(&lhs_ty))
                             .map_err(|e| create_span_ref(expr, e))?;
                         Ok(rhs_ty)
                     }
@@ -335,6 +395,7 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
                     BinaryOp::Mul => {
                         substitutions
                             .unify(&lhs_ty, &ValueType::Scalar)
+                            .and_then(|()| substitutions.mark_as_linear(&rhs_ty))
                             .map_err(|e| create_span_ref(expr, e))?;
                         Ok(rhs_ty)
                     }
@@ -342,6 +403,7 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
                     BinaryOp::Div => {
                         substitutions
                             .unify(&rhs_ty, &ValueType::Scalar)
+                            .and_then(|()| substitutions.mark_as_linear(&lhs_ty))
                             .map_err(|e| create_span_ref(expr, e))?;
                         Ok(lhs_ty)
                     }
@@ -352,6 +414,23 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
                             .and_then(|()| substitutions.unify(&rhs_ty, &ValueType::Element))
                             .map_err(|e| create_span_ref(expr, e))?;
                         Ok(rhs_ty)
+                    }
+
+                    BinaryOp::Eq | BinaryOp::NotEq => {
+                        substitutions
+                            .unify(&lhs_ty, &rhs_ty)
+                            .map_err(|e| create_span_ref(expr, e))?;
+                        Ok(ValueType::Bool)
+                    }
+
+                    BinaryOp::And | BinaryOp::Or => {
+                        substitutions
+                            .unify(&lhs_ty, &ValueType::Bool)
+                            .map_err(|e| create_span_ref(expr, e))?;
+                        substitutions
+                            .unify(&rhs_ty, &ValueType::Bool)
+                            .map_err(|e| create_span_ref(expr, e))?;
+                        Ok(ValueType::Bool)
                     }
                 }
             }
@@ -456,7 +535,7 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
             .map(|arg| substitutions.resolve(arg))
             .collect();
         let return_type = substitutions.resolve(&return_type);
-        let fn_ty = FnType::new(arg_types, return_type);
+        let fn_ty = FnType::new(arg_types, return_type, &substitutions.lin);
         self.scopes
             .last_mut()
             .unwrap()
@@ -478,17 +557,6 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
             Assignment { ref lhs, ref rhs } => {
                 let rhs_ty = self.process_expr_inner(substitutions, rhs)?;
                 let lhs_ty = self.process_lvalue(substitutions, lhs);
-                substitutions
-                    .unify(&lhs_ty, &rhs_ty)
-                    .map(|()| ValueType::Void)
-                    .map_err(|e| create_span_ref(statement, e))
-            }
-
-            Comparison {
-                ref lhs, ref rhs, ..
-            } => {
-                let lhs_ty = self.process_expr_inner(substitutions, lhs)?;
-                let rhs_ty = self.process_expr_inner(substitutions, rhs)?;
                 substitutions
                     .unify(&lhs_ty, &rhs_ty)
                     .map(|()| ValueType::Void)
@@ -538,6 +606,8 @@ mod tests {
         context
             .innermost_scope()
             .insert_var("G", Value::Element(Ed25519.base_element()))
+            .insert_var("true", Value::Bool(true))
+            .insert_var("false", Value::Bool(false))
             .insert_native_fn("rand", Rand::new(thread_rng()))
             .insert_native_fn("sha512", FromSha512);
         context
@@ -545,7 +615,7 @@ mod tests {
 
     #[test]
     fn statements_with_a_block() {
-        let code = "y = { x = 3; 2*x }; [y]x ?= 6 * x;\0";
+        let code = "y = { x = 3; 2*x }; [y]x == 6 * x;\0";
         let statements = Statement::parse_list(Span::new(code)).unwrap();
         let mut context = Context::new(Ed25519);
         context
@@ -555,6 +625,20 @@ mod tests {
         let mut types = TypeContext::new(&context);
         types.process_statements(&statements).unwrap();
         assert_eq!(types.get_var_type("y").unwrap(), ValueType::Scalar);
+    }
+
+    #[test]
+    fn boolean_statements() {
+        let code = "y = x == [2]x; y = y || { x = 3; x != 7 };\0";
+        let statements = Statement::parse_list(Span::new(code)).unwrap();
+        let mut context = Context::new(Ed25519);
+        context
+            .innermost_scope()
+            .insert_var("x", Value::Element(Ed25519.base_element()));
+
+        let mut types = TypeContext::new(&context);
+        types.process_statements(&statements).unwrap();
+        assert_eq!(types.get_var_type("y").unwrap(), ValueType::Bool);
     }
 
     #[test]
@@ -575,7 +659,41 @@ mod tests {
         types.process_statements(&statements).unwrap();
         assert_eq!(
             types.get_fn_type("sign").unwrap().to_string(),
-            "fn<T>(Sc, T) -> (Ge, Sc)"
+            "fn<T: ?Lin>(Sc, T) -> (Ge, Sc)"
+        );
+    }
+
+    #[test]
+    fn non_linear_types_in_function() {
+        let mut code = r#"
+        fn compare(x, y) {
+            x == y
+        }
+        fn compare_hash(x, z) {
+            x == [:sha512(z)]G
+        }
+        fn add_hashes(x, y) {
+            :sha512(x, y) + :sha512(y, x)
+        }
+        "#
+        .to_owned();
+        code.push('\0');
+
+        let statements = Statement::parse_list(Span::new(&code)).unwrap();
+        let context = create_context(&code);
+        let mut types = TypeContext::new(&context);
+        types.process_statements(&statements).unwrap();
+        assert_eq!(
+            types.get_fn_type("compare").unwrap().to_string(),
+            "fn<T: ?Lin>(T, T) -> bool"
+        );
+        assert_eq!(
+            types.get_fn_type("compare_hash").unwrap().to_string(),
+            "fn<T: ?Lin>(Ge, T) -> bool"
+        );
+        assert_eq!(
+            types.get_fn_type("add_hashes").unwrap().to_string(),
+            "fn<T: ?Lin, U: ?Lin>(T, U) -> Sc"
         );
     }
 
@@ -597,7 +715,7 @@ mod tests {
         types.process_statements(&statements).unwrap();
         assert_eq!(
             types.get_fn_type("hinted").unwrap().to_string(),
-            "fn<T>((Sc, Ge), (T, Ge)) -> Ge"
+            "fn<T: ?Lin>((Sc, Ge), (T, Ge)) -> Ge"
         );
     }
 
@@ -675,6 +793,39 @@ mod tests {
             types.get_fn_type("tuple_fn").unwrap().to_string(),
             "fn((Sc, Sc), (Sc, Sc)) -> Ge"
         );
+    }
+
+    #[test]
+    fn linear_marking() {
+        let code = "fn add(x, y) { (x == y, x + y) }\0";
+        let statements = Statement::parse_list(Span::new(&code)).unwrap();
+        let context = create_context(&code);
+        let mut types = TypeContext::new(&context);
+        types.process_statements(&statements).unwrap();
+        let ty = types.get_fn_type("add").unwrap();
+        assert_eq!(ty.to_string(), "fn<T>(T, T) -> (bool, T)");
+
+        let code = "fn add(x, y) { (x == y, x + y) } :add(true, false);\0";
+        let statements = Statement::parse_list(Span::new(&code)).unwrap();
+        let mut types = TypeContext::new(&context);
+        let err = types.process_statements(&statements).unwrap_err();
+        assert_matches!(err.extra, TypeError::NonLinearType(ValueType::Bool));
+
+        let mut code = r#"
+            fn add(x, y) {
+                (x == y, x + y)
+            }
+            fn bog(x) {
+                flag = x == 1;
+                :add(flag, !flag)
+            }
+        "#
+        .to_owned();
+        code.push('\0');
+        let statements = Statement::parse_list(Span::new(&code)).unwrap();
+        let mut types = TypeContext::new(&context);
+        let err = types.process_statements(&statements).unwrap_err();
+        assert_matches!(err.extra, TypeError::NonLinearType(ValueType::Bool));
     }
 
     #[test]

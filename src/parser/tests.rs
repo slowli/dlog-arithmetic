@@ -356,31 +356,44 @@ fn element_expr_works() {
 }
 
 #[test]
-fn negating_expr_works() {
+fn unary_expr_works() {
     let input = Span::new("-3;");
     assert_eq!(
         expr(input).unwrap().1.extra,
-        Expr::Neg(Box::new(sp(1, "3", Expr::Number)))
+        Expr::Unary {
+            op: create_span(span(0, "-"), UnaryOp::Neg),
+            inner: Box::new(sp(1, "3", Expr::Number)),
+        }
     );
 
-    let input = Span::new("-x;");
+    let input = Span::new("-x + 5;");
     assert_eq!(
-        expr(input).unwrap().1.extra,
-        Expr::Neg(Box::new(sp(1, "x", Expr::Variable)))
+        *expr(input).unwrap().1.extra.binary_lhs().unwrap(),
+        sp(
+            0,
+            "-x",
+            Expr::Unary {
+                op: create_span(span(0, "-"), UnaryOp::Neg),
+                inner: Box::new(sp(1, "x", Expr::Variable)),
+            }
+        ),
     );
 
     let input = Span::new("-(x + y);");
     assert_eq!(
         expr(input).unwrap().1.extra,
-        Expr::Neg(Box::new(sp(
-            2,
-            "x + y",
-            Expr::Binary {
-                lhs: Box::new(sp(2, "x", Expr::Variable)),
-                op: BinaryOp::from_span(span(4, "+")),
-                rhs: Box::new(sp(6, "y", Expr::Variable)),
-            }
-        )))
+        Expr::Unary {
+            op: create_span(span(0, "-"), UnaryOp::Neg),
+            inner: Box::new(sp(
+                2,
+                "x + y",
+                Expr::Binary {
+                    lhs: Box::new(sp(2, "x", Expr::Variable)),
+                    op: BinaryOp::from_span(span(4, "+")),
+                    rhs: Box::new(sp(6, "y", Expr::Variable)),
+                }
+            ))
+        }
     );
 
     let input = Span::new("2 * -3;");
@@ -389,8 +402,21 @@ fn negating_expr_works() {
         Expr::Binary {
             lhs: Box::new(sp(0, "2", Expr::Number)),
             op: BinaryOp::from_span(span(2, "*")),
-            rhs: Box::new(sp(4, "-3", Expr::Neg(Box::new(sp(5, "3", Expr::Number))))),
+            rhs: Box::new(sp(
+                4,
+                "-3",
+                Expr::Unary {
+                    op: create_span(span(4, "-"), UnaryOp::Neg),
+                    inner: Box::new(sp(5, "3", Expr::Number)),
+                }
+            )),
         }
+    );
+
+    let input = Span::new("!f && x == 2;");
+    assert_eq!(
+        expr(input).unwrap().1.extra.binary_lhs().unwrap().fragment,
+        "!f"
     );
 }
 
@@ -478,68 +504,90 @@ fn assignment_works() {
 
 #[test]
 fn comparison_works() {
-    let input = Span::new("s*G ?= R + h*A;");
+    let input = Span::new("x == 3;");
     assert_eq!(
         statement(input).unwrap().1,
-        Statement::Comparison {
-            lhs: Box::new(sp(0, "s*G", {
-                Expr::Binary {
-                    lhs: Box::new(sp(0, "s", Expr::Variable)),
-                    op: BinaryOp::from_span(span(1, "*")),
-                    rhs: Box::new(sp(2, "G", Expr::Variable)),
-                }
-            })),
-            rhs: Box::new(sp(7, "R + h*A", {
-                Expr::Binary {
-                    lhs: Box::new(sp(7, "R", Expr::Variable)),
-                    op: BinaryOp::from_span(span(9, "+")),
-                    rhs: Box::new(sp(
-                        11,
-                        "h*A",
-                        Expr::Binary {
-                            lhs: Box::new(sp(11, "h", Expr::Variable)),
-                            op: BinaryOp::from_span(span(12, "*")),
-                            rhs: Box::new(sp(13, "A", Expr::Variable)),
-                        },
-                    )),
-                }
-            })),
-            eq_sign: span(4, "?="),
-        }
+        Statement::Expr(sp(
+            0,
+            "x == 3",
+            Expr::Binary {
+                lhs: Box::new(sp(0, "x", Expr::Variable)),
+                rhs: Box::new(sp(5, "3", Expr::Number)),
+                op: BinaryOp::from_span(span(2, "==")),
+            }
+        ))
     );
 
-    let input = Span::new("[s]G ?= R + [h]A;");
+    let input = Span::new("s*G == R + h*A;");
     assert_eq!(
         statement(input).unwrap().1,
-        Statement::Comparison {
-            lhs: Box::new(sp(
-                0,
-                "[s]G",
-                Expr::Binary {
-                    lhs: Box::new(sp(1, "s", Expr::Variable)),
-                    op: BinaryOp::from_span(span(2, "]")),
-                    rhs: Box::new(sp(3, "G", Expr::Variable)),
-                }
-            )),
-            rhs: Box::new(sp(
-                8,
-                "R + [h]A",
-                Expr::Binary {
-                    lhs: Box::new(sp(8, "R", Expr::Variable)),
-                    op: BinaryOp::from_span(span(10, "+")),
-                    rhs: Box::new(sp(
-                        12,
-                        "[h]A",
-                        Expr::Binary {
-                            lhs: Box::new(sp(13, "h", Expr::Variable)),
-                            op: BinaryOp::from_span(span(14, "]")),
-                            rhs: Box::new(sp(15, "A", Expr::Variable)),
-                        },
-                    )),
-                }
-            )),
-            eq_sign: span(5, "?="),
-        }
+        Statement::Expr(sp(
+            0,
+            "s*G == R + h*A",
+            Expr::Binary {
+                lhs: Box::new(sp(0, "s*G", {
+                    Expr::Binary {
+                        lhs: Box::new(sp(0, "s", Expr::Variable)),
+                        op: BinaryOp::from_span(span(1, "*")),
+                        rhs: Box::new(sp(2, "G", Expr::Variable)),
+                    }
+                })),
+                rhs: Box::new(sp(7, "R + h*A", {
+                    Expr::Binary {
+                        lhs: Box::new(sp(7, "R", Expr::Variable)),
+                        op: BinaryOp::from_span(span(9, "+")),
+                        rhs: Box::new(sp(
+                            11,
+                            "h*A",
+                            Expr::Binary {
+                                lhs: Box::new(sp(11, "h", Expr::Variable)),
+                                op: BinaryOp::from_span(span(12, "*")),
+                                rhs: Box::new(sp(13, "A", Expr::Variable)),
+                            },
+                        )),
+                    }
+                })),
+                op: BinaryOp::from_span(span(4, "==")),
+            }
+        ))
+    );
+
+    let input = Span::new("[s]G != R + [h]A;");
+    assert_eq!(
+        statement(input).unwrap().1,
+        Statement::Expr(sp(
+            0,
+            "[s]G != R + [h]A",
+            Expr::Binary {
+                lhs: Box::new(sp(
+                    0,
+                    "[s]G",
+                    Expr::Binary {
+                        lhs: Box::new(sp(1, "s", Expr::Variable)),
+                        op: BinaryOp::from_span(span(2, "]")),
+                        rhs: Box::new(sp(3, "G", Expr::Variable)),
+                    }
+                )),
+                rhs: Box::new(sp(
+                    8,
+                    "R + [h]A",
+                    Expr::Binary {
+                        lhs: Box::new(sp(8, "R", Expr::Variable)),
+                        op: BinaryOp::from_span(span(10, "+")),
+                        rhs: Box::new(sp(
+                            12,
+                            "[h]A",
+                            Expr::Binary {
+                                lhs: Box::new(sp(13, "h", Expr::Variable)),
+                                op: BinaryOp::from_span(span(14, "]")),
+                                rhs: Box::new(sp(15, "A", Expr::Variable)),
+                            },
+                        )),
+                    }
+                )),
+                op: BinaryOp::from_span(span(5, "!=")),
+            }
+        ))
     );
 }
 
@@ -662,6 +710,39 @@ fn expr_evaluation_order() {
 }
 
 #[test]
+fn evaluation_order_with_bool_expressions() {
+    let input = Span::new("x == 2 + 3 * 4 && y == [x]G;");
+    let output = expr(input).unwrap().1.extra;
+    assert_matches!(
+        output,
+        Expr::Binary { op, ref lhs, ref rhs } if op == BinaryOp::from_span(span(15, "&&")) &&
+            lhs.fragment == "x == 2 + 3 * 4" &&
+            rhs.fragment == "y == [x]G"
+    );
+    let scalar_expr = output.binary_lhs().unwrap().extra.binary_rhs().unwrap();
+    assert_eq!(scalar_expr.fragment, "2 + 3 * 4");
+    assert_matches!(
+        scalar_expr.extra,
+        Expr::Binary { op, .. } if op == BinaryOp::from_span(span(7, "+"))
+    );
+
+    let input = Span::new("x == 2 * z + 3 * 4 && (y, z) == ([x]G, 2);");
+    let output = expr(input).unwrap().1.extra;
+    assert_matches!(
+        output,
+        Expr::Binary { op, ref lhs, ref rhs } if op == BinaryOp::from_span(span(19, "&&")) &&
+            lhs.fragment == "x == 2 * z + 3 * 4" &&
+            rhs.fragment == "(y, z) == ([x]G, 2)"
+    );
+    let scalar_expr = output.binary_lhs().unwrap().extra.binary_rhs().unwrap();
+    assert_eq!(scalar_expr.fragment, "2 * z + 3 * 4");
+    assert_matches!(
+        scalar_expr.extra,
+        Expr::Binary { op, .. } if op == BinaryOp::from_span(span(11, "+"))
+    );
+}
+
+#[test]
 fn block_parsing() {
     let input = Span::new("{ x + y }");
     assert_eq!(
@@ -777,14 +858,14 @@ fn incomplete_expr() {
 #[test]
 fn incomplete_statement() {
     const SNIPPETS: &[&str] = &[
-        "x ?=",
+        "x ==",
         "x =",
         "(",
         "(x, y",
         "(x, y) =",
         "(\nx: Ge,",
         "x = 2 +",
-        "x ?= 2 +",
+        "x == 2 +",
     ];
     for snippet in SNIPPETS {
         let input = Span::new(snippet);

@@ -45,14 +45,10 @@ fn report_parse_error(writer: &StandardStream, code_map: &CodeMap<&str>, e: Span
 }
 
 fn report_eval_error(writer: &StandardStream, code_map: &CodeMap<&str>, e: ErrorWithBacktrace) {
-    let severity = match e.inner.extra {
-        EvalError::AssertionFail => Severity::Warning,
-        _ => Severity::Error,
-    };
+    let severity = Severity::Error;
     let main_label = Label::new(byte_span(&e.inner), LabelStyle::Primary);
     let message: Cow<str> = match e.inner.extra {
         EvalError::DivisionByZero => "Right-hand side of this division is 0".into(),
-        EvalError::AssertionFail => "Sides of this comparison differ".into(),
         EvalError::IntToScalar(_) => "Number cannot be converted into scalar".into(),
         EvalError::ArgTypeMismatch { ref expected } => {
             format!("Function expects arguments {}", expected).into()
@@ -114,6 +110,11 @@ fn dump_variable<G: Group>(
     let ge_color = ColorSpec::new().set_fg(Some(Color::Yellow)).clone();
 
     match var {
+        Value::Bool(b) => {
+            writer.set_color(&buffer_color)?;
+            write!(writer, "{}", if *b { "true" } else { "false" })?;
+            writer.reset()
+        }
         Value::Buffer(buffer) => {
             writer.set_color(&buffer_color)?;
             write!(writer, "0x_{}", hex::encode(buffer))?;

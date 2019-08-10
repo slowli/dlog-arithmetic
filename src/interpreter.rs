@@ -7,7 +7,7 @@ use crate::{
     groups::Group,
     parser::{
         create_span, create_span_ref, map_span, BinaryOp, Error as ParseError, Expr, LiteralType,
-        Lvalue, Span, Spanned, SpannedExpr, SpannedLvalue, SpannedStatement, Statement,
+        Lvalue, Span, Spanned, SpannedExpr, SpannedLvalue, SpannedStatement, Statement, UnaryOp,
     },
     type_inference::{Substitutions, TypeContext, TypeError},
 };
@@ -16,6 +16,8 @@ use crate::{
 pub enum Value<G: Group> {
     /// Absence of value, `()` in Rust terms.
     Void,
+    /// Boolean value.
+    Bool(bool),
     /// Scalar value.
     Scalar(G::Scalar),
     /// Group element.
@@ -30,6 +32,7 @@ impl<G: Group> Clone for Value<G> {
     fn clone(&self) -> Self {
         match self {
             Value::Void => Value::Void,
+            Value::Bool(b) => Value::Bool(*b),
             Value::Scalar(sc) => Value::Scalar(*sc),
             Value::Element(ge) => Value::Element(*ge),
             Value::Buffer(ref buffer) => Value::Buffer(buffer.clone()),
@@ -43,6 +46,7 @@ impl<G: Group> PartialEq for Value<G> {
         use self::Value::*;
         match (self, rhs) {
             (Void, Void) => true,
+            (Bool(x), Bool(y)) => x == y,
             (Scalar(x), Scalar(y)) => x == y,
             (Element(x), Element(y)) => x == y,
             (Buffer(x), Buffer(y)) => x == y,
@@ -60,6 +64,7 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Value::Void => formatter.debug_tuple("Void").finish(),
+            Value::Bool(b) => formatter.debug_tuple("Bool").field(b).finish(),
             Value::Scalar(value) => formatter.debug_tuple("Scalar").field(value).finish(),
             Value::Element(value) => formatter.debug_tuple("Element").field(value).finish(),
             Value::Buffer(buffer) => formatter.debug_tuple("Buffer").field(buffer).finish(),
@@ -79,6 +84,7 @@ impl<G: Group> Value<G> {
     pub fn ty(&self) -> ValueType {
         match self {
             Value::Void => ValueType::Void,
+            Value::Bool(_) => ValueType::Bool,
             Value::Scalar(_) => ValueType::Scalar,
             Value::Element(_) => ValueType::Element,
             Value::Buffer(_) => ValueType::Buffer,
@@ -99,6 +105,20 @@ impl<G: Group> Value<G> {
         match self {
             Value::Element(ge) => Some(*ge),
             _ => None,
+        }
+    }
+}
+
+impl<G: Group> ops::Not for Value<G> {
+    type Output = Result<Self, EvalError>;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Value::Bool(b) => Ok(Value::Bool(!b)),
+            _ => Err(EvalError::InvalidUnaryOp {
+                op: "!",
+                ty: self.ty(),
+            }),
         }
     }
 }
@@ -331,6 +351,8 @@ pub enum ValueType {
     Any,
     /// Void (`()` in Rust).
     Void,
+    /// Boolean.
+    Bool,
     /// Group scalar.
     Scalar,
     /// Group element.
@@ -350,6 +372,7 @@ impl PartialEq for ValueType {
             (Any, _)
             | (_, Any)
             | (Void, Void)
+            | (Bool, Bool)
             | (Scalar, Scalar)
             | (Element, Element)
             | (Buffer, Buffer) => true,
@@ -364,9 +387,11 @@ impl PartialEq for ValueType {
 impl fmt::Display for ValueType {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ValueType::Void => formatter.write_str("void"),
             ValueType::Any => formatter.write_str("_"),
             ValueType::TypeVar(idx) => formatter.write_str(Self::type_param(*idx).as_ref()),
+
+            ValueType::Void => formatter.write_str("void"),
+            ValueType::Bool => formatter.write_str("bool"),
             ValueType::Scalar => formatter.write_str("Sc"),
             ValueType::Element => formatter.write_str("Ge"),
             ValueType::Buffer => formatter.write_str("Bytes"),
@@ -427,6 +452,15 @@ pub enum EvalError {
         actual: ValueType,
     },
 
+    /// Invalid value type for a unary operation.
+    #[fail(display = "Invalid argument for a unary operation")]
+    InvalidUnaryOp {
+        /// Operator.
+        op: &'static str,
+        /// Type of the argument.
+        ty: ValueType,
+    },
+
     /// Invalid value types for a binary operation.
     #[fail(display = "Invalid arguments for a binary operation")]
     InvalidBinaryOp {
@@ -441,10 +475,6 @@ pub enum EvalError {
     /// Runtime error during function evaluation.
     #[fail(display = "Error evaluating function")]
     FunctionCall(#[fail(cause)] failure::Error),
-
-    /// Assertion failure.
-    #[fail(display = "Assertion failed")]
-    AssertionFail,
 
     /// RHS of an assignment cannot be destructured into a tuple.
     #[fail(display = "Cannot destructure variable")]
@@ -731,11 +761,17 @@ impl<'a, G: Group> Context<'a, G> {
             }
 
             // Arithmetic operations
-            Expr::Neg(ref inner) => {
-                // FIXME: this may be slow
+            Expr::Unary { ref inner, op } => {
                 let val = self.evaluate_expr_inner(inner, backtrace)?;
-                let minus_one = Value::Scalar(-self.group.scalar_from_u64(1).unwrap());
-                (minus_one * val).map_err(|e| create_span_ref(expr, e))
+
+                match op.extra {
+                    UnaryOp::Not => (!val).map_err(|e| create_span_ref(expr, e)),
+                    UnaryOp::Neg => {
+                        // FIXME: this may be slow
+                        let minus_one = Value::Scalar(-self.group.scalar_from_u64(1).unwrap());
+                        (minus_one * val).map_err(|e| create_span_ref(expr, e))
+                    }
+                }
             }
 
             Expr::Binary {
@@ -744,6 +780,33 @@ impl<'a, G: Group> Context<'a, G> {
                 op,
             } => {
                 let lhs = self.evaluate_expr_inner(x, backtrace)?;
+
+                // Short-circuit logic for bool operations.
+                match op.extra {
+                    BinaryOp::And | BinaryOp::Or => match lhs {
+                        Value::Bool(b) => {
+                            if !b && op.extra == BinaryOp::And {
+                                return Ok(Value::Bool(false));
+                            } else if b && op.extra == BinaryOp::Or {
+                                return Ok(Value::Bool(true));
+                            }
+                        }
+
+                        _ => {
+                            return Err(create_span_ref(
+                                expr,
+                                EvalError::InvalidBinaryOp {
+                                    op: op.extra.as_str(),
+                                    lhs_ty: lhs.ty(),
+                                    rhs_ty: ValueType::Any,
+                                },
+                            ));
+                        }
+                    },
+
+                    _ => { /* do nothing yet */ }
+                }
+
                 let rhs = self.evaluate_expr_inner(y, backtrace)?;
                 match op.extra {
                     BinaryOp::Add => lhs + rhs,
@@ -771,6 +834,34 @@ impl<'a, G: Group> Context<'a, G> {
                             rhs_ty: rhs.ty(),
                         }),
                     },
+
+                    BinaryOp::Eq | BinaryOp::NotEq => {
+                        let (lhs_ty, rhs_ty) = (lhs.ty(), rhs.ty());
+                        if lhs_ty != rhs_ty {
+                            Err(EvalError::InvalidBinaryOp {
+                                op: op.extra.as_str(),
+                                lhs_ty,
+                                rhs_ty,
+                            })
+                        } else if op.extra == BinaryOp::Eq {
+                            Ok(Value::Bool(lhs == rhs))
+                        } else {
+                            Ok(Value::Bool(lhs != rhs))
+                        }
+                    }
+
+                    BinaryOp::And | BinaryOp::Or => {
+                        match rhs {
+                            // This works since we know that AND / OR hasn't short-circuited.
+                            Value::Bool(b) => Ok(Value::Bool(b)),
+
+                            _ => Err(EvalError::InvalidBinaryOp {
+                                op: op.extra.as_str(),
+                                lhs_ty: ValueType::Bool,
+                                rhs_ty: rhs.ty(),
+                            }),
+                        }
+                    }
                 }
                 .map_err(|e| create_span_ref(expr, e))
             }
@@ -840,18 +931,6 @@ impl<'a, G: Group> Context<'a, G> {
                 Assignment { ref lhs, ref rhs } => {
                     let evaluated = self.evaluate_expr_inner(rhs, backtrace)?;
                     self.scopes.last_mut().unwrap().assign(lhs, evaluated)?;
-                }
-
-                Comparison {
-                    ref lhs,
-                    ref rhs,
-                    eq_sign,
-                } => {
-                    let lhs_eval = self.evaluate_expr_inner(lhs, backtrace)?;
-                    let rhs_eval = self.evaluate_expr_inner(rhs, backtrace)?;
-                    if lhs_eval != rhs_eval {
-                        return Err(create_span(*eq_sign, EvalError::AssertionFail));
-                    }
                 }
             }
         }
@@ -929,7 +1008,7 @@ impl Code {
 mod tests {
     use super::*;
     use crate::{
-        functions::{FromSha512, Rand},
+        functions::{FromSha512, Rand, TypeConstraint},
         groups::{Ed25519, Ed25519Error},
     };
 
@@ -937,7 +1016,7 @@ mod tests {
     use curve25519::{constants::ED25519_BASEPOINT_POINT, scalar::Scalar, traits::IsIdentity};
     use rand::thread_rng;
     use sha2::{Digest, Sha512};
-    use std::{collections::HashSet, convert::TryInto};
+    use std::{collections::HashSet, convert::TryInto, iter::FromIterator};
 
     #[test]
     fn function_type_display() {
@@ -945,6 +1024,7 @@ mod tests {
             args: FnArgs::Any,
             return_type: ValueType::Scalar,
             type_count: 0,
+            constraints: None,
         };
         assert_eq!(ty.to_string(), "fn(...) -> Sc");
 
@@ -955,6 +1035,7 @@ mod tests {
             ]),
             return_type: ValueType::Element,
             type_count: 0,
+            constraints: None,
         };
         assert_eq!(ty.to_string(), "fn(Ge, (Sc, Sc)) -> Ge");
 
@@ -965,6 +1046,7 @@ mod tests {
             ]),
             return_type: ValueType::Void,
             type_count: 0,
+            constraints: None,
         };
         assert_eq!(ty.to_string(), "fn(Ge, (Sc, Sc))");
 
@@ -975,8 +1057,12 @@ mod tests {
             ]),
             return_type: ValueType::TypeVar(0),
             type_count: 2,
+            constraints: Some(HashMap::from_iter(vec![(
+                1,
+                TypeConstraint::MaybeNonLinear,
+            )])),
         };
-        assert_eq!(ty.to_string(), "fn<T, U>(Ge, (T, U)) -> T");
+        assert_eq!(ty.to_string(), "fn<T, U: ?Lin>(Ge, (T, U)) -> T");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Functions.
 
 use curve25519::scalar::Scalar;
-use failure::Error;
+use failure::{format_err, Error};
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
 use std::{
@@ -21,6 +21,25 @@ use crate::{
     Context, Group, Scope, Value, ValueType,
 };
 
+/// Constraints on a type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TypeConstraint {
+    /// The type may be non-linear.
+    ///
+    /// Linear type `T` defines `T + T: T`, `T - T: T`, `Sc * T: T` and `T / Sc: T` operations.
+    /// Linear types include scalars, elements, voids and tuples with linear components.
+    /// Examples of non-linear types are `bytes` and `bool`.
+    MaybeNonLinear,
+}
+
+impl fmt::Display for TypeConstraint {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TypeConstraint::MaybeNonLinear => formatter.write_str("?Lin"),
+        }
+    }
+}
+
 /// Function type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnType {
@@ -30,6 +49,8 @@ pub struct FnType {
     pub return_type: ValueType,
     /// Number of type parameters.
     pub type_count: usize,
+    /// Constraints on the type parameters.
+    pub constraints: Option<HashMap<usize, TypeConstraint>>,
 }
 
 impl fmt::Display for FnType {
@@ -37,8 +58,12 @@ impl fmt::Display for FnType {
         formatter.write_str("fn")?;
         if self.type_count > 0 {
             formatter.write_str("<")?;
+
             for i in 0..self.type_count {
                 formatter.write_str(ValueType::type_param(i).as_ref())?;
+                if !self.is_linear(i) {
+                    formatter.write_str(": ?Lin")?;
+                }
                 if i + 1 < self.type_count {
                     formatter.write_str(", ")?;
                 }
@@ -56,28 +81,59 @@ impl fmt::Display for FnType {
 }
 
 impl FnType {
-    pub(crate) fn new(mut args: Vec<ValueType>, mut return_type: ValueType) -> Self {
+    pub(crate) fn new(
+        mut args: Vec<ValueType>,
+        mut return_type: ValueType,
+        linear_types: &HashSet<usize>,
+    ) -> Self {
         let mut reduced = HashMap::new();
         for ty in args.iter_mut().chain(Some(&mut return_type)) {
-            reduce(&mut reduced, ty);
+            reduce(&mut reduced, ty, linear_types);
         }
 
-        fn reduce(reductions: &mut HashMap<usize, usize>, ty: &mut ValueType) {
+        fn reduce(
+            reductions: &mut HashMap<usize, (usize, bool)>,
+            ty: &mut ValueType,
+            linear_types: &HashSet<usize>,
+        ) {
             let len = reductions.len();
             if let ValueType::TypeVar(idx) = ty {
-                let reduced_idx = *reductions.entry(*idx).or_insert(len);
+                let (reduced_idx, _) = *reductions
+                    .entry(*idx)
+                    .or_insert_with(|| (len, linear_types.contains(idx)));
                 *ty = ValueType::TypeVar(reduced_idx);
             } else if let ValueType::Tuple(ref mut fragments) = ty {
                 for fragment in fragments {
-                    reduce(reductions, fragment);
+                    reduce(reductions, fragment, linear_types);
                 }
             }
         }
+
+        let constraints = if !reduced.is_empty() {
+            let collected: HashMap<_, _> = reduced
+                .values()
+                .filter_map(|(idx, is_linear)| {
+                    if !*is_linear {
+                        Some((*idx, TypeConstraint::MaybeNonLinear))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !collected.is_empty() {
+                Some(collected)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Self {
             args: FnArgs::List(args),
             return_type,
             type_count: reduced.len(),
+            constraints,
         }
     }
 
@@ -86,7 +142,17 @@ impl FnType {
             args: FnArgs::List((0..args_len).map(|_| ValueType::Any).collect()),
             return_type: ValueType::Any,
             type_count: 0,
+            constraints: None,
         }
+    }
+
+    /// Checks if a type variable with the specified index is linear.
+    pub(crate) fn is_linear(&self, var_idx: usize) -> bool {
+        debug_assert!(var_idx < self.type_count);
+        self.constraints
+            .as_ref()
+            .and_then(|constraints| constraints.get(&var_idx))
+            .is_none()
     }
 }
 
@@ -134,12 +200,14 @@ impl NativeFn<Ed25519> for FromSha512 {
             args: FnArgs::Any,
             return_type: ValueType::Scalar,
             type_count: 0,
+            constraints: None,
         }
     }
 
     fn execute(&self, args: &[Value<Ed25519>]) -> Result<Value<Ed25519>, Error> {
         fn input_var(hash: &mut Sha512, var: &Value<Ed25519>) {
             match var {
+                Value::Bool(b) => hash.input(&[*b as u8]),
                 Value::Buffer(buffer) => hash.input(buffer),
                 Value::Scalar(scalar) => hash.input(scalar.as_bytes()),
                 Value::Element(elem) => hash.input(elem.compress().as_bytes()),
@@ -177,6 +245,7 @@ impl<R: CryptoRng + RngCore> NativeFn<Ed25519> for Rand<R> {
             args: FnArgs::List(vec![]),
             return_type: ValueType::Scalar,
             type_count: 0,
+            constraints: None,
         }
     }
 
@@ -184,6 +253,29 @@ impl<R: CryptoRng + RngCore> NativeFn<Ed25519> for Rand<R> {
         debug_assert!(args.is_empty());
         let mut rng = self.0.borrow_mut();
         Ok(Value::Scalar(Scalar::random(&mut *rng)))
+    }
+}
+
+/// Assertion function.
+#[derive(Debug, Clone, Copy)]
+pub struct Assert;
+
+impl<G: Group> NativeFn<G> for Assert {
+    fn ty(&self) -> FnType {
+        FnType {
+            args: FnArgs::List(vec![ValueType::Bool]),
+            return_type: ValueType::Void,
+            type_count: 0,
+            constraints: None,
+        }
+    }
+
+    fn execute(&self, args: &[Value<G>]) -> Result<Value<G>, Error> {
+        match args {
+            [Value::Bool(true)] => Ok(Value::Void),
+            [Value::Bool(false)] => Err(format_err!("Assertion failed")),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -330,7 +422,7 @@ fn process_vars<'a, G: Group>(
                 process_vars(captures, local_vars, fragment, context)?;
             }
         }
-        Expr::Neg(ref inner) => {
+        Expr::Unary { ref inner, .. } => {
             process_vars(captures, local_vars, inner, context)?;
         }
         Expr::Binary {
@@ -376,12 +468,6 @@ fn process_vars_in_statement<'a, G: Group>(
             process_vars(captures, local_vars, rhs, context)?;
             set_local_vars(local_vars, lhs);
             Ok(())
-        }
-        Statement::Comparison {
-            ref lhs, ref rhs, ..
-        } => {
-            process_vars(captures, local_vars, lhs, context)?;
-            process_vars(captures, local_vars, rhs, context)
         }
         Statement::Empty => Ok(()),
         Statement::Fn(_) => Err(create_span_ref(statement, TypeError::EmbeddedFunction)),

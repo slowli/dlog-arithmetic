@@ -7,7 +7,7 @@ use nom::{
         streaming,
     },
     character::complete::{char as tag_char, one_of},
-    combinator::{cut, map, map_res, opt, peek, recognize},
+    combinator::{cut, map, map_res, not, opt, peek, recognize},
     error::{context, ErrorKind},
     multi::{fold_many1, many0, separated_list},
     sequence::{delimited, preceded, terminated, tuple},
@@ -445,8 +445,13 @@ pub enum Expr<'a> {
         args: Vec<SpannedExpr<'a>>,
     },
 
-    /// Negation, e.g., `-x`.
-    Neg(Box<SpannedExpr<'a>>),
+    /// Unary operation, e.g., `-x` or `!x`.
+    Unary {
+        /// Operator.
+        op: Spanned<'a, UnaryOp>,
+        /// Inner expression.
+        inner: Box<SpannedExpr<'a>>,
+    },
 
     /// Binary operation, e.g., `x + 1`.
     Binary {
@@ -499,6 +504,41 @@ impl Expr<'_> {
             Err(NomErr::Incomplete(_)) => Err(Error::Incomplete.with_span(input_span).0),
         }
     }
+
+    /// Returns LHS of the binary expression. If this is not a binary expression, returns `None`.
+    pub fn binary_lhs(&self) -> Option<&SpannedExpr> {
+        match self {
+            Expr::Binary { ref lhs, .. } => Some(lhs),
+            _ => None,
+        }
+    }
+
+    /// Returns RHS of the binary expression. If this is not a binary expression, returns `None`.
+    pub fn binary_rhs(&self) -> Option<&SpannedExpr> {
+        match self {
+            Expr::Binary { ref rhs, .. } => Some(rhs),
+            _ => None,
+        }
+    }
+}
+
+/// Unary operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+    /// Negation (`-`).
+    Neg,
+    /// Boolean negation (`!`).
+    Not,
+}
+
+impl UnaryOp {
+    fn from_span(span: Spanned<char>) -> Spanned<Self> {
+        match span.extra {
+            '-' => create_span(span, UnaryOp::Neg),
+            '!' => create_span(span, UnaryOp::Not),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Binary arithmetic operation.
@@ -514,6 +554,14 @@ pub enum BinaryOp {
     Div,
     /// Power (`[x]Y`).
     Power,
+    /// Equality (`==`).
+    Eq,
+    /// Non-equality (`!=`).
+    NotEq,
+    /// Boolean AND (`&&`).
+    And,
+    /// Boolean OR (`||`).
+    Or,
 }
 
 impl BinaryOp {
@@ -528,16 +576,37 @@ impl BinaryOp {
                 "*" => BinaryOp::Mul,
                 "/" => BinaryOp::Div,
                 "]" => BinaryOp::Power,
+                "==" => BinaryOp::Eq,
+                "!=" => BinaryOp::NotEq,
+                "&&" => BinaryOp::And,
+                "||" => BinaryOp::Or,
                 _ => unreachable!(),
             },
         }
     }
 
+    /// Returns the string representation of this operation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Power => "]",
+            BinaryOp::Eq => "==",
+            BinaryOp::NotEq => "!=",
+            BinaryOp::And => "&&",
+            BinaryOp::Or => "||",
+        }
+    }
+
     fn priority(self) -> usize {
         match self {
-            BinaryOp::Add | BinaryOp::Sub => 0,
-            BinaryOp::Mul | BinaryOp::Div => 1,
-            BinaryOp::Power => 2,
+            BinaryOp::And | BinaryOp::Or => 0,
+            BinaryOp::Eq | BinaryOp::NotEq => 1,
+            BinaryOp::Add | BinaryOp::Sub => 2,
+            BinaryOp::Mul | BinaryOp::Div => 3,
+            BinaryOp::Power => 4,
         }
     }
 }
@@ -588,14 +657,20 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
             create_span(span, Expr::Number)
         }),
         map(
-            with_span(tuple((terminated(tag_char('-'), ws), expr))),
+            with_span(tuple((
+                terminated(with_span(one_of("-!")), ws),
+                simple_expr,
+            ))),
             |spanned| {
-                let (_, inner) = spanned.extra;
+                let (op, inner) = spanned.extra;
                 Spanned {
                     offset: spanned.offset,
                     line: spanned.line,
                     fragment: spanned.fragment,
-                    extra: Expr::Neg(Box::new(inner)),
+                    extra: Expr::Unary {
+                        op: UnaryOp::from_span(op),
+                        inner: Box::new(inner),
+                    },
                 }
             },
         ),
@@ -609,7 +684,17 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
 }
 
 fn binary_expr(input: Span) -> NomResult<SpannedExpr> {
-    let binary_ops = with_span(map(one_of("+-*/"), drop));
+    let binary_ops = alt((
+        tag("+"),
+        tag("-"),
+        tag("*"),
+        tag("/"),
+        tag("=="),
+        tag("!="),
+        tag("&&"),
+        tag("||"),
+    ));
+    let binary_ops = with_span(map(binary_ops, drop));
     let binary_parser = tuple((
         simple_expr,
         many0(tuple((delimited(ws, binary_ops, ws), simple_expr))),
@@ -638,7 +723,7 @@ fn binary_expr(input: Span) -> NomResult<SpannedExpr> {
                     },
                 )
             } else {
-                right_contour.truncate(insert_pos - 1);
+                right_contour.truncate(insert_pos);
                 right_contour.push(new_op.extra);
 
                 let mut parent = &mut acc;
@@ -649,6 +734,7 @@ fn binary_expr(input: Span) -> NomResult<SpannedExpr> {
                     };
                 }
 
+                parent.fragment = unite_spans(input, &parent, &expr).fragment;
                 if let Expr::Binary { ref mut rhs, .. } = parent.extra {
                     let rhs_span = unite_spans(input, rhs, &expr);
                     let dummy = Box::new(create_span_ref(rhs, Expr::Variable));
@@ -687,16 +773,6 @@ pub enum Statement<'a> {
         lhs: SpannedLvalue<'a>,
         /// RHS of the assignment.
         rhs: Box<SpannedExpr<'a>>,
-    },
-
-    /// Comparison between 2 expressions, e.g., `[x]G ?= [y]K`.
-    Comparison {
-        /// LHS of the comparison.
-        lhs: Box<SpannedExpr<'a>>,
-        /// RHS of the comparison.
-        rhs: Box<SpannedExpr<'a>>,
-        /// Equality operator.
-        eq_sign: Span<'a>,
     },
 }
 
@@ -749,18 +825,11 @@ impl Statement<'_> {
 }
 
 fn statement(input: Span) -> NomResult<Statement> {
-    let assignment_parser = tuple((opt(terminated(lvalue, delimited(ws, tag("="), ws))), expr));
-    let comparison_parser = tuple((expr, delimited(ws, tag("?="), ws), cut(expr)));
+    let assignment = tuple((tag("="), peek(not(tag_char('=')))));
+    let assignment_parser = tuple((opt(terminated(lvalue, delimited(ws, assignment, ws))), expr));
 
     alt((
         map(fun_def, Statement::Fn),
-        map(comparison_parser, |(lhs, eq_sign, rhs)| {
-            Statement::Comparison {
-                lhs: Box::new(lhs),
-                eq_sign,
-                rhs: Box::new(rhs),
-            }
-        }),
         map(assignment_parser, |(lvalue, rvalue)| {
             if let Some(lvalue) = lvalue {
                 Statement::Assignment {
