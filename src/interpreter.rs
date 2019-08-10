@@ -6,9 +6,10 @@ use crate::{
     functions::{FnArgs, FnType, Function, InterpretedFn, NativeFn},
     groups::Group,
     parser::{
-        map_span, map_span_ref, BinaryOp, Error as ParseError, Expr, LiteralType, Lvalue, Span,
-        Spanned, SpannedExpr, SpannedLvalue, SpannedStatement, Statement,
+        create_span, create_span_ref, map_span, BinaryOp, Error as ParseError, Expr, LiteralType,
+        Lvalue, Span, Spanned, SpannedExpr, SpannedLvalue, SpannedStatement, Statement,
     },
+    type_inference::{Substitutions, TypeContext, TypeError},
 };
 
 /// Value used in finite group arithmetic.
@@ -284,7 +285,7 @@ impl<'a, G: Group> Scope<'a, G> {
                 if let Some(ref ty) = ty {
                     let actual = rvalue.ty();
                     if ty.extra != actual {
-                        return Err(map_span_ref(
+                        return Err(create_span_ref(
                             ty,
                             EvalError::AnnotatedTypeMismatch { actual },
                         ));
@@ -299,7 +300,7 @@ impl<'a, G: Group> Scope<'a, G> {
             Lvalue::Tuple(ref assignments) => {
                 if let Value::Tuple(fragments) = rvalue {
                     if assignments.len() != fragments.len() {
-                        return Err(map_span_ref(
+                        return Err(create_span_ref(
                             lvalue,
                             EvalError::TupleLenMismatch {
                                 expected: assignments.len(),
@@ -312,7 +313,7 @@ impl<'a, G: Group> Scope<'a, G> {
                         self.assign(assignment, fragment)?;
                     }
                 } else {
-                    return Err(map_span_ref(
+                    return Err(create_span_ref(
                         lvalue,
                         EvalError::CannotDestructure(rvalue.ty()),
                     ));
@@ -396,14 +397,6 @@ impl ValueType {
 /// Error that can occur during expression evaluation.
 #[derive(Debug, Fail)]
 pub enum EvalError {
-    /// Undefined variable.
-    #[fail(display = "Undefined variable")]
-    Undefined,
-
-    /// Undefined function.
-    #[fail(display = "Undefined function")]
-    UndefinedFunction,
-
     /// Error converting a number to a scalar.
     #[fail(display = "Error converting number to scalar: {}", _0)]
     IntToScalar(#[fail(cause)] failure::Error),
@@ -469,9 +462,15 @@ pub enum EvalError {
         actual: usize,
     },
 
-    /// Function definition within a function, which is not yet supported.
-    #[fail(display = "Embedded functions are not yet supported")]
-    EmbeddedFunction,
+    /// Type inference error.
+    #[fail(display = "Type inference error: {}", _0)]
+    Type(#[fail(cause)] TypeError),
+}
+
+impl From<TypeError> for EvalError {
+    fn from(e: TypeError) -> Self {
+        EvalError::Type(e)
+    }
 }
 
 /// Call backtrace.
@@ -525,6 +524,7 @@ pub struct ErrorWithBacktrace<'a> {
 pub struct Context<'a, G: Group> {
     pub(crate) group: G,
     scopes: Vec<Scope<'a, G>>,
+    type_inference: bool,
 }
 
 impl<G: Group> fmt::Debug for Context<'_, G>
@@ -541,11 +541,21 @@ where
 }
 
 impl<'a, G: Group> Context<'a, G> {
-    /// Creates a new stack with a single global scope.
+    /// Creates a new context.
     pub fn new(group: G) -> Self {
         Self {
             group,
             scopes: vec![Scope::new()],
+            type_inference: false,
+        }
+    }
+
+    /// Creates a new context with the type inference switched on.
+    pub fn typed(group: G) -> Self {
+        Self {
+            group,
+            scopes: vec![Scope::new()],
+            type_inference: true,
         }
     }
 
@@ -594,14 +604,17 @@ impl<'a, G: Group> Context<'a, G> {
         ty: &FnType,
     ) -> Result<(), Spanned<'a, EvalError>> {
         if let FnArgs::List(ref expected_types) = ty.args {
-            let arg_types: Vec<_> = args.iter().map(Value::ty).collect();
-            if &arg_types != expected_types {
-                return Err(map_span_ref(
-                    expr,
-                    EvalError::ArgTypeMismatch {
-                        expected: ty.args.clone(),
-                    },
-                ));
+            let arg_types = args.iter().map(Value::ty);
+            let mut substitutions = Substitutions::default();
+            for (expected_ty, arg_ty) in expected_types.iter().zip(arg_types) {
+                substitutions.unify(expected_ty, &arg_ty).map_err(|_| {
+                    create_span_ref(
+                        expr,
+                        EvalError::ArgTypeMismatch {
+                            expected: ty.args.clone(),
+                        },
+                    )
+                })?;
             }
         }
         Ok(())
@@ -623,15 +636,15 @@ impl<'a, G: Group> Context<'a, G> {
         if let Some(backtrace) = backtrace {
             backtrace.push_call(
                 &name.fragment[1..],
-                map_span_ref(&func.definition, ()),
-                map_span_ref(expr, ()),
+                create_span_ref(&func.definition, ()),
+                create_span_ref(expr, ()),
             );
         }
         self.scopes.push(func.captures.clone());
         for (lvalue, val) in def.args.iter().zip(args) {
             self.innermost_scope().assign(lvalue, val.clone())?;
         }
-        let result = self.evaluate_inner(&def.body, backtrace);
+        let result = self.evaluate_inner(&def.body, backtrace, None);
 
         if result.is_ok() {
             if let Some(backtrace) = backtrace {
@@ -648,20 +661,22 @@ impl<'a, G: Group> Context<'a, G> {
         backtrace: &mut Option<Backtrace<'a>>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
         match expr.extra {
-            Expr::Variable => self
-                .get_var(expr.fragment)
-                .cloned()
-                .ok_or_else(|| map_span_ref(expr, EvalError::Undefined)),
+            Expr::Variable => self.get_var(expr.fragment).cloned().ok_or_else(|| {
+                create_span_ref(
+                    expr,
+                    TypeError::UndefinedVar(expr.fragment.to_owned()).into(),
+                )
+            }),
 
             Expr::Number => {
                 let value = expr
                     .fragment
                     .parse::<u64>()
-                    .map_err(|e| map_span_ref(expr, EvalError::IntToScalar(e.into())))?;
+                    .map_err(|e| create_span_ref(expr, EvalError::IntToScalar(e.into())))?;
                 self.group
                     .scalar_from_u64(value)
                     .map(Value::Scalar)
-                    .map_err(|e| map_span_ref(expr, EvalError::IntToScalar(e.into())))
+                    .map_err(|e| create_span_ref(expr, EvalError::IntToScalar(e.into())))
             }
 
             Expr::Literal { ty, ref value } => match ty {
@@ -670,12 +685,12 @@ impl<'a, G: Group> Context<'a, G> {
                     .group
                     .scalar_from_bytes(value)
                     .map(Value::Scalar)
-                    .map_err(|e| map_span_ref(expr, EvalError::BufferToScalar(e.into()))),
+                    .map_err(|e| create_span_ref(expr, EvalError::BufferToScalar(e.into()))),
                 LiteralType::Element => self
                     .group
                     .element_from_bytes(value)
                     .map(Value::Element)
-                    .map_err(|e| map_span_ref(expr, EvalError::BufferToElement(e.into()))),
+                    .map_err(|e| create_span_ref(expr, EvalError::BufferToElement(e.into()))),
             },
 
             Expr::Tuple(ref fragments) => {
@@ -695,17 +710,23 @@ impl<'a, G: Group> Context<'a, G> {
 
                 let resolved_name = &name.fragment[1..];
                 if let Some(func) = self.get_fn(resolved_name).cloned() {
-                    Self::check_fn_args(expr, &args, func.ty())?;
+                    if !self.type_inference {
+                        // If type inference is on, types are checked earlier.
+                        Self::check_fn_args(expr, &args, func.ty())?;
+                    }
                     match func {
                         Function::Interpreted(ref func) => {
                             self.evaluate_fn(expr, func, &args, backtrace)
                         }
                         Function::Native(_, ref func) => func
                             .execute(&args)
-                            .map_err(|e| map_span_ref(expr, EvalError::FunctionCall(e))),
+                            .map_err(|e| create_span_ref(expr, EvalError::FunctionCall(e))),
                     }
                 } else {
-                    Err(map_span(name, EvalError::UndefinedFunction))
+                    Err(create_span(
+                        name,
+                        TypeError::UndefinedFn(resolved_name.to_owned()).into(),
+                    ))
                 }
             }
 
@@ -714,7 +735,7 @@ impl<'a, G: Group> Context<'a, G> {
                 // FIXME: this may be slow
                 let val = self.evaluate_expr_inner(inner, backtrace)?;
                 let minus_one = Value::Scalar(-self.group.scalar_from_u64(1).unwrap());
-                (minus_one * val).map_err(|e| map_span_ref(expr, e))
+                (minus_one * val).map_err(|e| create_span_ref(expr, e))
             }
 
             Expr::Binary {
@@ -751,12 +772,12 @@ impl<'a, G: Group> Context<'a, G> {
                         }),
                     },
                 }
-                .map_err(|e| map_span_ref(expr, e))
+                .map_err(|e| create_span_ref(expr, e))
             }
 
             Expr::Block(ref statements) => {
                 self.create_scope();
-                let result = self.evaluate_inner(statements, backtrace);
+                let result = self.evaluate_inner(statements, backtrace, None);
                 self.scopes.pop(); // Clear the scope in any case
                 result
             }
@@ -768,6 +789,16 @@ impl<'a, G: Group> Context<'a, G> {
         &mut self,
         expr: &SpannedExpr<'a>,
     ) -> Result<Value<G>, ErrorWithBacktrace<'a>> {
+        if self.type_inference {
+            let mut type_context = TypeContext::new(self);
+            type_context
+                .process_expr(expr)
+                .map_err(|e| ErrorWithBacktrace {
+                    inner: map_span(e, Into::into),
+                    backtrace: Backtrace::default(),
+                })?;
+        }
+
         let mut backtrace = Some(Backtrace::default());
         self.evaluate_expr_inner(expr, &mut backtrace)
             .map_err(|e| ErrorWithBacktrace {
@@ -781,6 +812,7 @@ impl<'a, G: Group> Context<'a, G> {
         &mut self,
         statements: &[SpannedStatement<'a>],
         backtrace: &mut Option<Backtrace<'a>>,
+        fn_types: Option<&HashMap<&'a str, FnType>>,
     ) -> Result<Value<G>, Spanned<'a, EvalError>> {
         use crate::parser::Statement::*;
 
@@ -795,7 +827,12 @@ impl<'a, G: Group> Context<'a, G> {
                 }
 
                 Fn(def) => {
-                    let fun = InterpretedFn::new(map_span_ref(statement, def.clone()), self)?;
+                    let mut fun = InterpretedFn::new(create_span_ref(statement, def.clone()), self)
+                        .map_err(|e| map_span(e, Into::into))?;
+                    // TODO: this type assignment can backfire if a function is redefined.
+                    if let Some(fn_types) = fn_types {
+                        fun.set_ty(fn_types[def.name.fragment].clone());
+                    }
                     self.innermost_scope()
                         .insert_fn(def.name.fragment, Function::Interpreted(Rc::new(fun)));
                 }
@@ -813,7 +850,7 @@ impl<'a, G: Group> Context<'a, G> {
                     let lhs_eval = self.evaluate_expr_inner(lhs, backtrace)?;
                     let rhs_eval = self.evaluate_expr_inner(rhs, backtrace)?;
                     if lhs_eval != rhs_eval {
-                        return Err(map_span(*eq_sign, EvalError::AssertionFail));
+                        return Err(create_span(*eq_sign, EvalError::AssertionFail));
                     }
                 }
             }
@@ -826,8 +863,21 @@ impl<'a, G: Group> Context<'a, G> {
         &mut self,
         statements: &[SpannedStatement<'a>],
     ) -> Result<Value<G>, ErrorWithBacktrace<'a>> {
+        let fun_types = if self.type_inference {
+            let mut type_context = TypeContext::new(self);
+            type_context
+                .process_statements(statements)
+                .map_err(|e| ErrorWithBacktrace {
+                    inner: map_span(e, Into::into),
+                    backtrace: Backtrace::default(),
+                })?;
+            Some(type_context.innermost_scope().functions().clone())
+        } else {
+            None
+        };
+
         let mut backtrace = Some(Backtrace::default());
-        self.evaluate_inner(statements, &mut backtrace)
+        self.evaluate_inner(statements, &mut backtrace, fun_types.as_ref())
             .map_err(|e| ErrorWithBacktrace {
                 inner: e,
                 backtrace: backtrace.unwrap(),

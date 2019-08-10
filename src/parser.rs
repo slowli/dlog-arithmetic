@@ -27,7 +27,7 @@ pub type Span<'a> = LocatedSpan<&'a str>;
 pub type Spanned<'a, T> = LocatedSpanEx<&'a str, T>;
 type NomResult<'a, T> = nom::IResult<Span<'a>, T, SpannedError<'a>>;
 
-pub(crate) fn map_span<T, U>(span: Spanned<T>, extra: U) -> Spanned<U> {
+pub(crate) fn create_span<T, U>(span: Spanned<T>, extra: U) -> Spanned<U> {
     Spanned {
         offset: span.offset,
         line: span.line,
@@ -36,7 +36,16 @@ pub(crate) fn map_span<T, U>(span: Spanned<T>, extra: U) -> Spanned<U> {
     }
 }
 
-pub(crate) fn map_span_ref<'a, T, U>(span: &Spanned<'a, T>, extra: U) -> Spanned<'a, U> {
+pub(crate) fn map_span<T, U>(span: Spanned<T>, f: impl FnOnce(T) -> U) -> Spanned<U> {
+    Spanned {
+        offset: span.offset,
+        line: span.line,
+        fragment: span.fragment,
+        extra: f(span.extra),
+    }
+}
+
+pub(crate) fn create_span_ref<'a, T, U>(span: &Spanned<'a, T>, extra: U) -> Spanned<'a, U> {
     Spanned {
         offset: span.offset,
         line: span.line,
@@ -183,14 +192,14 @@ impl<'a> Error<'a> {
             Error::UnexpectedChar { context }
             | Error::UnexpectedTerm { context }
             | Error::Other { context, .. } => {
-                *context = Some(map_span(span, ctx));
+                *context = Some(create_span(span, ctx));
             }
             _ => { /* do nothing */ }
         }
     }
 
     fn with_span<T>(self, span: Spanned<'a, T>) -> SpannedError<'a> {
-        SpannedError(map_span(span, self))
+        SpannedError(create_span(span, self))
     }
 }
 
@@ -205,7 +214,7 @@ impl<'a> nom::error::ParseError<Span<'a>> for SpannedError<'a> {
             input.fragment = &input.fragment[..1];
         }
 
-        SpannedError(map_span(
+        SpannedError(create_span(
             input,
             if kind == ErrorKind::Char {
                 if input.fragment.is_empty() {
@@ -396,7 +405,7 @@ fn lvalue(input: Span) -> NomResult<SpannedLvalue> {
                     cut(with_span(type_info)),
                 )),
             )),
-            |(name, ty)| map_span(name, Lvalue::Variable { ty }),
+            |(name, ty)| create_span(name, Lvalue::Variable { ty }),
         ),
     ))(input)
 }
@@ -561,29 +570,22 @@ fn paren_expr(input: Span) -> NomResult<SpannedExpr> {
             Error::UnexpectedChar { context: None }.with_span(parsed),
         )),
         1 => Ok((rest, parsed.extra.pop().unwrap())),
-        _ => {
-            let terms = mem::replace(&mut parsed.extra, vec![]);
-            Ok((rest, map_span_ref(&parsed, Expr::Tuple(terms))))
-        }
+        _ => Ok((rest, map_span(parsed, Expr::Tuple))),
     })
 }
 
 fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
     alt((
-        map(var_name, |span| map_span(span, Expr::Variable)),
+        map(var_name, |span| create_span(span, Expr::Variable)),
         hex_buffer,
-        map(with_span(string), |mut spanned_str| {
-            let s = mem::replace(&mut spanned_str.extra, String::new());
-            map_span(
-                spanned_str,
-                Expr::Literal {
-                    value: s.into_bytes(),
-                    ty: LiteralType::Buffer,
-                },
-            )
+        map(with_span(string), |spanned_str| {
+            map_span(spanned_str, |s| Expr::Literal {
+                value: s.into_bytes(),
+                ty: LiteralType::Buffer,
+            })
         }),
         map(take_while1(|c: char| c.is_ascii_digit()), |span| {
-            map_span(span, Expr::Number)
+            create_span(span, Expr::Number)
         }),
         map(
             with_span(tuple((terminated(tag_char('-'), ws), expr))),
@@ -597,17 +599,12 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
                 }
             },
         ),
-        map(with_span(fun), |mut spanned| {
-            let name = spanned.extra.0;
-            let args = mem::replace(&mut spanned.extra.1, vec![]);
-            map_span(spanned, Expr::Function { name, args })
+        map(with_span(fun), |spanned| {
+            map_span(spanned, |(name, args)| Expr::Function { name, args })
         }),
         paren_expr,
         power_expr,
-        map(with_span(block), |mut spanned| {
-            let statements = mem::replace(&mut spanned.extra, vec![]);
-            map_span(spanned, Expr::Block(statements))
-        }),
+        map(with_span(block), |spanned| map_span(spanned, Expr::Block)),
     ))(input)
 }
 
@@ -632,7 +629,7 @@ fn binary_expr(input: Span) -> NomResult<SpannedExpr> {
                 right_contour.clear();
                 right_contour.push(new_op.extra);
 
-                map_span(
+                create_span(
                     united_span,
                     Expr::Binary {
                         lhs: Box::new(acc),
@@ -654,14 +651,14 @@ fn binary_expr(input: Span) -> NomResult<SpannedExpr> {
 
                 if let Expr::Binary { ref mut rhs, .. } = parent.extra {
                     let rhs_span = unite_spans(input, rhs, &expr);
-                    let dummy = Box::new(map_span_ref(rhs, Expr::Variable));
+                    let dummy = Box::new(create_span_ref(rhs, Expr::Variable));
                     let old_rhs = mem::replace(rhs, dummy);
                     let new_expr = Expr::Binary {
                         lhs: old_rhs,
                         op: new_op,
                         rhs: Box::new(expr),
                     };
-                    *rhs = Box::new(map_span(rhs_span, new_expr));
+                    *rhs = Box::new(create_span(rhs_span, new_expr));
                 }
                 acc.fragment = united_span.fragment;
                 acc
@@ -796,7 +793,7 @@ fn separated_statements(input: Span) -> NomResult<Vec<SpannedStatement>> {
         |(mut statements, final_statement)| {
             statements.push(final_statement.unwrap_or_else(|| {
                 if let Some(statement) = statements.last() {
-                    map_span_ref(statement, Statement::Empty)
+                    create_span_ref(statement, Statement::Empty)
                 } else {
                     Spanned {
                         offset: input.offset,

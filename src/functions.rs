@@ -14,10 +14,11 @@ use std::{
 use crate::{
     groups::Ed25519,
     parser::{
-        map_span_ref, Expr, FnDefinition, Lvalue, Spanned, SpannedExpr, SpannedLvalue,
+        create_span_ref, Expr, FnDefinition, Lvalue, Spanned, SpannedExpr, SpannedLvalue,
         SpannedStatement, Statement,
     },
-    Context, EvalError, Group, Scope, Value, ValueType,
+    type_inference::TypeError,
+    Context, Group, Scope, Value, ValueType,
 };
 
 /// Function type.
@@ -77,6 +78,14 @@ impl FnType {
             args: FnArgs::List(args),
             return_type,
             type_count: reduced.len(),
+        }
+    }
+
+    pub(crate) fn any(args_len: usize) -> Self {
+        Self {
+            args: FnArgs::List((0..args_len).map(|_| ValueType::Any).collect()),
+            return_type: ValueType::Any,
+            type_count: 0,
         }
     }
 }
@@ -204,7 +213,7 @@ impl<'a, G: Group> InterpretedFn<'a, G> {
     pub fn new(
         definition: Spanned<'a, FnDefinition<'a>>,
         context: &Context<'a, G>,
-    ) -> Result<Self, Spanned<'a, EvalError>> {
+    ) -> Result<Self, Spanned<'a, TypeError>> {
         let mut captures = Scope::new();
         let mut local_vars = HashSet::new();
 
@@ -215,20 +224,9 @@ impl<'a, G: Group> InterpretedFn<'a, G> {
             process_vars_in_statement(&mut captures, &mut local_vars, statement, context)?;
         }
 
-        // FIXME: use Hindley-Milner type inference
-        let ty = FnType {
-            args: FnArgs::List(
-                (0..definition.extra.args.len())
-                    .map(|_| ValueType::Any)
-                    .collect(),
-            ),
-            return_type: ValueType::Any,
-            type_count: 0,
-        };
-
         Ok(Self {
+            ty: FnType::any(definition.extra.args.len()),
             definition,
-            ty,
             captures,
         })
     }
@@ -236,6 +234,10 @@ impl<'a, G: Group> InterpretedFn<'a, G> {
     /// Returns the function type.
     pub fn ty(&self) -> &FnType {
         &self.ty
+    }
+
+    pub(crate) fn set_ty(&mut self, ty: FnType) {
+        self.ty = ty;
     }
 }
 
@@ -305,7 +307,7 @@ fn process_vars<'a, G: Group>(
     local_vars: &mut HashSet<&'a str>,
     expr: &SpannedExpr<'a>,
     context: &Context<'a, G>,
-) -> Result<(), Spanned<'a, EvalError>> {
+) -> Result<(), Spanned<'a, TypeError>> {
     match expr.extra {
         Expr::Variable => {
             let var_name = expr.fragment;
@@ -314,7 +316,10 @@ fn process_vars<'a, G: Group>(
             } else if let Some(val) = context.get_var(var_name) {
                 captures.insert_var(var_name, val.clone());
             } else {
-                return Err(map_span_ref(expr, EvalError::Undefined));
+                return Err(create_span_ref(
+                    expr,
+                    TypeError::UndefinedVar(var_name.to_owned()),
+                ));
             }
         }
 
@@ -344,7 +349,10 @@ fn process_vars<'a, G: Group>(
             } else if let Some(fun) = context.get_fn(fn_name) {
                 captures.insert_fn(fn_name, fun.clone());
             } else {
-                return Err(map_span_ref(&name, EvalError::UndefinedFunction));
+                return Err(create_span_ref(
+                    &name,
+                    TypeError::UndefinedFn(fn_name.to_owned()),
+                ));
             }
         }
         Expr::Block(ref statements) => {
@@ -361,7 +369,7 @@ fn process_vars_in_statement<'a, G: Group>(
     local_vars: &mut HashSet<&'a str>,
     statement: &SpannedStatement<'a>,
     context: &Context<'a, G>,
-) -> Result<(), Spanned<'a, EvalError>> {
+) -> Result<(), Spanned<'a, TypeError>> {
     match statement.extra {
         Statement::Expr(ref expr) => process_vars(captures, local_vars, expr, context),
         Statement::Assignment { ref lhs, ref rhs } => {
@@ -376,6 +384,6 @@ fn process_vars_in_statement<'a, G: Group>(
             process_vars(captures, local_vars, rhs, context)
         }
         Statement::Empty => Ok(()),
-        Statement::Fn(_) => Err(map_span_ref(statement, EvalError::EmbeddedFunction)),
+        Statement::Fn(_) => Err(create_span_ref(statement, TypeError::EmbeddedFunction)),
     }
 }

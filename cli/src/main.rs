@@ -54,8 +54,6 @@ fn report_eval_error(writer: &StandardStream, code_map: &CodeMap<&str>, e: Error
         EvalError::DivisionByZero => "Right-hand side of this division is 0".into(),
         EvalError::AssertionFail => "Sides of this comparison differ".into(),
         EvalError::IntToScalar(_) => "Number cannot be converted into scalar".into(),
-        EvalError::Undefined => "Undefined variable occurrence".into(),
-        EvalError::UndefinedFunction => "Undefined function occurrence".into(),
         EvalError::ArgTypeMismatch { ref expected } => {
             format!("Function expects arguments {}", expected).into()
         }
@@ -253,7 +251,7 @@ fn main() {
     let mut code_map = CodeMap::new();
     let mut line_index = 0;
 
-    let mut state = Context::new(Ed25519);
+    let mut state = Context::typed(Ed25519);
     state
         .innermost_scope()
         .insert_native_fn("sc_sha512", fns::FromSha512)

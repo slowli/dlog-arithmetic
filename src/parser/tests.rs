@@ -13,11 +13,11 @@ fn span(offset: usize, fragment: &str) -> Span {
 }
 
 fn sp<'a>(offset: usize, fragment: &'a str, expr: Expr<'a>) -> SpannedExpr<'a> {
-    map_span(span(offset, fragment), expr)
+    create_span(span(offset, fragment), expr)
 }
 
 fn lsp<'a>(offset: usize, fragment: &'a str, lvalue: Lvalue<'a>) -> SpannedLvalue<'a> {
-    map_span(span(offset, fragment), lvalue)
+    create_span(span(offset, fragment), lvalue)
 }
 
 #[test]
@@ -261,7 +261,7 @@ fn element_expr_works() {
                     )],
                 }
             })),
-            op: map_span(span(12, "+"), BinaryOp::Add),
+            op: create_span(span(12, "+"), BinaryOp::Add),
             rhs: Box::new(sp(14, "A_b", Expr::Variable)),
         }
     );
@@ -287,11 +287,11 @@ fn element_expr_works() {
                             )],
                         },
                     )),
-                    op: map_span(span(12, "+"), BinaryOp::Add),
+                    op: create_span(span(12, "+"), BinaryOp::Add),
                     rhs: Box::new(sp(14, "A_b", Expr::Variable)),
                 }
             })),
-            op: map_span(span(18, "-"), BinaryOp::Sub),
+            op: create_span(span(18, "-"), BinaryOp::Sub),
             rhs: Box::new(sp(20, "C", Expr::Variable)),
         }
     );
@@ -610,7 +610,7 @@ fn lvalues_are_parsed() {
                 1,
                 "x",
                 Lvalue::Variable {
-                    ty: Some(map_span(
+                    ty: Some(create_span(
                         span(4, "(Sc, _)"),
                         ValueType::Tuple(vec![ValueType::Scalar, ValueType::Any,])
                     )),
@@ -625,7 +625,7 @@ fn lvalues_are_parsed() {
                         17,
                         "z",
                         Lvalue::Variable {
-                            ty: Some(map_span(span(20, "Ge"), ValueType::Element)),
+                            ty: Some(create_span(span(20, "Ge"), ValueType::Element)),
                         }
                     ),
                 ])
@@ -666,7 +666,7 @@ fn block_parsing() {
     let input = Span::new("{ x + y }");
     assert_eq!(
         block(input).unwrap().1,
-        vec![map_span(
+        vec![create_span(
             span(2, "x + y"),
             Statement::Expr(sp(
                 2,
@@ -699,7 +699,7 @@ fn fn_definition_parsing() {
         FnDefinition {
             name: span(3, "foo"),
             args: vec![lsp(7, "x", Lvalue::Variable { ty: None }),],
-            body: vec![map_span(
+            body: vec![create_span(
                 span(12, "x + 3"),
                 Statement::Expr(sp(
                     12,
@@ -727,7 +727,7 @@ fn fn_definition_parsing() {
                     7,
                     "x",
                     Lvalue::Variable {
-                        ty: Some(map_span(span(10, "Sc"), ValueType::Scalar)),
+                        ty: Some(create_span(span(10, "Sc"), ValueType::Scalar)),
                     }
                 ),
                 lsp(
@@ -739,7 +739,7 @@ fn fn_definition_parsing() {
                             18,
                             "_",
                             Lvalue::Variable {
-                                ty: Some(map_span(span(21, "Ge"), ValueType::Element)),
+                                ty: Some(create_span(span(21, "Ge"), ValueType::Element)),
                             }
                         )
                     ])
