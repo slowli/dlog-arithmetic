@@ -85,7 +85,7 @@ fn hex_buffer_works() {
             "0xAbcd1234",
             Expr::Literal {
                 value: vec![0xab, 0xcd, 0x12, 0x34],
-                ty: LiteralType::Buffer,
+                ty: LiteralType::Bytes,
             }
         )
     );
@@ -151,7 +151,7 @@ fn fun_works() {
                 "0x123456",
                 Expr::Literal {
                     value: vec![0x12, 0x34, 0x56],
-                    ty: LiteralType::Buffer,
+                    ty: LiteralType::Bytes,
                 }
             )]
         )
@@ -167,7 +167,7 @@ fn fun_works() {
                 "0x123456",
                 Expr::Literal {
                     value: vec![0x12, 0x34, 0x56],
-                    ty: LiteralType::Buffer,
+                    ty: LiteralType::Bytes,
                 }
             )]
         )
@@ -240,7 +240,7 @@ fn element_expr_works() {
                 "0x1234",
                 Expr::Literal {
                     value: vec![0x12, 0x34],
-                    ty: LiteralType::Buffer,
+                    ty: LiteralType::Bytes,
                 }
             )],
         }
@@ -258,7 +258,7 @@ fn element_expr_works() {
                         "0x1234",
                         Expr::Literal {
                             value: vec![0x12, 0x34],
-                            ty: LiteralType::Buffer,
+                            ty: LiteralType::Bytes,
                         },
                     )],
                 }
@@ -284,7 +284,7 @@ fn element_expr_works() {
                                 "0x1234",
                                 Expr::Literal {
                                     value: vec![0x12, 0x34],
-                                    ty: LiteralType::Buffer,
+                                    ty: LiteralType::Bytes,
                                 },
                             )],
                         },
@@ -314,7 +314,7 @@ fn element_expr_works() {
                                 "0x1234",
                                 Expr::Literal {
                                     value: vec![0x12, 0x34],
-                                    ty: LiteralType::Buffer,
+                                    ty: LiteralType::Bytes,
                                 },
                             )],
                         },
@@ -342,7 +342,7 @@ fn element_expr_works() {
                                         "0x00",
                                         Expr::Literal {
                                             value: vec![0],
-                                            ty: LiteralType::Buffer,
+                                            ty: LiteralType::Bytes,
                                         },
                                     )],
                                 },
@@ -458,7 +458,7 @@ fn assignment_works() {
                         "0x1234",
                         Expr::Literal {
                             value: vec![0x12, 0x34],
-                            ty: LiteralType::Buffer,
+                            ty: LiteralType::Bytes,
                         }
                     )],
                 }
@@ -489,7 +489,7 @@ fn assignment_works() {
                                         "0x0001",
                                         Expr::Literal {
                                             value: vec![0, 1],
-                                            ty: LiteralType::Buffer,
+                                            ty: LiteralType::Bytes,
                                         },
                                     )],
                                 },

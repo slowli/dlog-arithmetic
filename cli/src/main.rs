@@ -115,7 +115,7 @@ fn dump_variable<G: Group>(
             write!(writer, "{}", if *b { "true" } else { "false" })?;
             writer.reset()
         }
-        Value::Buffer(buffer) => {
+        Value::Bytes(buffer) => {
             writer.set_color(&buffer_color)?;
             write!(writer, "0x_{}", hex::encode(buffer))?;
             writer.reset()

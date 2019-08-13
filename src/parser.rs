@@ -303,7 +303,7 @@ fn hex_buffer(input: Span) -> NomResult<SpannedExpr> {
     );
 
     with_span(map(hex_parser, |(maybe_ty, value)| Expr::Literal {
-        ty: maybe_ty.unwrap_or(LiteralType::Buffer),
+        ty: maybe_ty.unwrap_or(LiteralType::Bytes),
         value,
     }))(input)
 }
@@ -378,7 +378,7 @@ fn type_info(input: Span) -> NomResult<ValueType> {
         map(tag_char('_'), |_| ValueType::Any),
         map(tag("Sc"), |_| ValueType::Scalar),
         map(tag("Ge"), |_| ValueType::Element),
-        map(tag("Bytes"), |_| ValueType::Buffer),
+        map(tag("bytes"), |_| ValueType::Bytes),
         map(
             delimited(
                 terminated(tag_char('('), ws),
@@ -417,7 +417,7 @@ fn lvalue(input: Span) -> NomResult<SpannedLvalue> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LiteralType {
     /// Literal is a generic buffer.
-    Buffer,
+    Bytes,
     /// Literal is a group scalar.
     Scalar,
     /// Literal is a group element.
@@ -653,7 +653,7 @@ fn simple_expr(input: Span) -> NomResult<SpannedExpr> {
         map(with_span(string), |spanned_str| {
             map_span(spanned_str, |s| Expr::Literal {
                 value: s.into_bytes(),
-                ty: LiteralType::Buffer,
+                ty: LiteralType::Bytes,
             })
         }),
         map(take_while1(|c: char| c.is_ascii_digit()), |span| {

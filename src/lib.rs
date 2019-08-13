@@ -52,7 +52,7 @@
 //!     (x, K) = :gen();
 //!
 //!     ## Functions can take arguments with optional type annotations.
-//!     fn ed25519_sign(x, message: Bytes) {
+//!     fn ed25519_sign(x, message: bytes) {
 //!         (r, R) = :gen();
 //!         c = :sha512(R, [x]G, message);
 //!         (R, r + c * x)

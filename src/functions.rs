@@ -208,7 +208,7 @@ impl NativeFn<Ed25519> for FromSha512 {
         fn input_var(hash: &mut Sha512, var: &Value<Ed25519>) {
             match var {
                 Value::Bool(b) => hash.input(&[*b as u8]),
-                Value::Buffer(buffer) => hash.input(buffer),
+                Value::Bytes(buffer) => hash.input(buffer),
                 Value::Scalar(scalar) => hash.input(scalar.as_bytes()),
                 Value::Element(elem) => hash.input(elem.compress().as_bytes()),
                 Value::Tuple(fragments) => {

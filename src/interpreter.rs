@@ -23,7 +23,7 @@ pub enum Value<G: Group> {
     /// Group element.
     Element(G::Element),
     /// Arbitrary-sized byte buffer.
-    Buffer(Vec<u8>),
+    Bytes(Vec<u8>),
     /// Tuple of values.
     Tuple(Vec<Value<G>>),
 }
@@ -35,7 +35,7 @@ impl<G: Group> Clone for Value<G> {
             Value::Bool(b) => Value::Bool(*b),
             Value::Scalar(sc) => Value::Scalar(*sc),
             Value::Element(ge) => Value::Element(*ge),
-            Value::Buffer(ref buffer) => Value::Buffer(buffer.clone()),
+            Value::Bytes(ref buffer) => Value::Bytes(buffer.clone()),
             Value::Tuple(ref fragments) => Value::Tuple(fragments.clone()),
         }
     }
@@ -49,7 +49,7 @@ impl<G: Group> PartialEq for Value<G> {
             (Bool(x), Bool(y)) => x == y,
             (Scalar(x), Scalar(y)) => x == y,
             (Element(x), Element(y)) => x == y,
-            (Buffer(x), Buffer(y)) => x == y,
+            (Bytes(x), Bytes(y)) => x == y,
             (Tuple(xs), Tuple(ys)) => xs == ys,
             _ => false,
         }
@@ -67,7 +67,7 @@ where
             Value::Bool(b) => formatter.debug_tuple("Bool").field(b).finish(),
             Value::Scalar(value) => formatter.debug_tuple("Scalar").field(value).finish(),
             Value::Element(value) => formatter.debug_tuple("Element").field(value).finish(),
-            Value::Buffer(buffer) => formatter.debug_tuple("Buffer").field(buffer).finish(),
+            Value::Bytes(buffer) => formatter.debug_tuple("Bytes").field(buffer).finish(),
             Value::Tuple(fragments) => {
                 let mut tuple = formatter.debug_tuple("Tuple");
                 for fragment in fragments {
@@ -87,7 +87,7 @@ impl<G: Group> Value<G> {
             Value::Bool(_) => ValueType::Bool,
             Value::Scalar(_) => ValueType::Scalar,
             Value::Element(_) => ValueType::Element,
-            Value::Buffer(_) => ValueType::Buffer,
+            Value::Bytes(_) => ValueType::Bytes,
             Value::Tuple(fragments) => ValueType::Tuple(fragments.iter().map(Value::ty).collect()),
         }
     }
@@ -133,7 +133,7 @@ impl<G: Group> ops::Add for Value<G> {
             (Scalar(x), Scalar(y)) => Ok(Value::Scalar(x + y)),
             (Element(x), Element(y)) => Ok(Value::Element(x + y)),
 
-            (Buffer(mut x), Buffer(y)) => Ok(Value::Buffer({
+            (Bytes(mut x), Bytes(y)) => Ok(Value::Bytes({
                 x.extend_from_slice(&y);
                 x
             })),
@@ -358,7 +358,7 @@ pub enum ValueType {
     /// Group element.
     Element,
     /// Byte buffer.
-    Buffer,
+    Bytes,
     /// Tuple.
     Tuple(Vec<ValueType>),
     /// Type variable.
@@ -375,7 +375,7 @@ impl PartialEq for ValueType {
             | (Bool, Bool)
             | (Scalar, Scalar)
             | (Element, Element)
-            | (Buffer, Buffer) => true,
+            | (Bytes, Bytes) => true,
 
             (TypeVar(x), TypeVar(y)) => x == y,
             (Tuple(xs), Tuple(ys)) => xs == ys,
@@ -392,9 +392,9 @@ impl fmt::Display for ValueType {
 
             ValueType::Void => formatter.write_str("void"),
             ValueType::Bool => formatter.write_str("bool"),
+            ValueType::Bytes => formatter.write_str("bytes"),
             ValueType::Scalar => formatter.write_str("Sc"),
             ValueType::Element => formatter.write_str("Ge"),
-            ValueType::Buffer => formatter.write_str("Bytes"),
             ValueType::Tuple(fragments) => {
                 formatter.write_str("(")?;
                 for (i, frag) in fragments.iter().enumerate() {
@@ -428,11 +428,11 @@ pub enum EvalError {
 
     /// Error converting bytes to a scalar.
     #[fail(display = "Error converting buffer to scalar: {}", _0)]
-    BufferToScalar(#[fail(cause)] failure::Error),
+    BytesToScalar(#[fail(cause)] failure::Error),
 
     /// Error converting bytes to a group element.
     #[fail(display = "Error converting buffer to element: {}", _0)]
-    BufferToElement(#[fail(cause)] failure::Error),
+    BytesToElement(#[fail(cause)] failure::Error),
 
     /// Division by zero.
     #[fail(display = "Division by zero")]
@@ -710,17 +710,17 @@ impl<'a, G: Group> Context<'a, G> {
             }
 
             Expr::Literal { ty, ref value } => match ty {
-                LiteralType::Buffer => Ok(Value::Buffer(value.clone())),
+                LiteralType::Bytes => Ok(Value::Bytes(value.clone())),
                 LiteralType::Scalar => self
                     .group
                     .scalar_from_bytes(value)
                     .map(Value::Scalar)
-                    .map_err(|e| create_span_ref(expr, EvalError::BufferToScalar(e.into()))),
+                    .map_err(|e| create_span_ref(expr, EvalError::BytesToScalar(e.into()))),
                 LiteralType::Element => self
                     .group
                     .element_from_bytes(value)
                     .map(Value::Element)
-                    .map_err(|e| create_span_ref(expr, EvalError::BufferToElement(e.into()))),
+                    .map_err(|e| create_span_ref(expr, EvalError::BytesToElement(e.into()))),
             },
 
             Expr::Tuple(ref fragments) => {
@@ -1105,7 +1105,7 @@ mod tests {
         let error = state.evaluate_expr(&scalar_expr).unwrap_err();
         assert_matches!(
             error.inner.extra,
-            EvalError::BufferToScalar(ref e)
+            EvalError::BytesToScalar(ref e)
                 if e.downcast_ref::<Ed25519Error>() == Some(&Ed25519Error::NonCanonicalScalar)
         );
 

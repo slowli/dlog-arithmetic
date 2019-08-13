@@ -387,7 +387,7 @@ fn ed25519_as_functions() {
     for message in &[b"ABC" as &[_], b"message", b"!!!"] {
         state
             .innermost_scope()
-            .insert_var("m", Value::Buffer(message.to_vec()));
+            .insert_var("m", Value::Bytes(message.to_vec()));
         state.evaluate(&statements).unwrap();
     }
 }

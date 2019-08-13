@@ -183,7 +183,7 @@ impl Substitutions {
             }
             ValueType::Any => unreachable!(),
 
-            ValueType::Bool | ValueType::Buffer => Err(TypeError::NonLinearType(ty.clone())),
+            ValueType::Bool | ValueType::Bytes => Err(TypeError::NonLinearType(ty.clone())),
             ValueType::Scalar | ValueType::Element | ValueType::Void => {
                 // These types are linear.
                 Ok(())
@@ -284,7 +284,7 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
 
             Number => Ok(ValueType::Scalar),
             Literal { ty, .. } => Ok(match ty {
-                LiteralType::Buffer => ValueType::Buffer,
+                LiteralType::Bytes => ValueType::Bytes,
                 LiteralType::Scalar => ValueType::Scalar,
                 LiteralType::Element => ValueType::Element,
             }),
@@ -767,7 +767,7 @@ mod tests {
     #[test]
     fn function_with_arg_type_hint() {
         let mut code = r#"
-        fn sign(x, msg: Bytes) {
+        fn sign(x, msg: bytes) {
             (r, R) = :rand() * (1, G);
             c = :sha512(R, msg);
             (R, r + c * x)
@@ -787,7 +787,7 @@ mod tests {
         types.process_statements(&statements).unwrap();
         assert_eq!(
             types.get_fn_type("sign").unwrap().to_string(),
-            "fn(Sc, Bytes) -> (Ge, Sc)"
+            "fn(Sc, bytes) -> (Ge, Sc)"
         );
         assert_eq!(
             types.get_fn_type("tuple_fn").unwrap().to_string(),
