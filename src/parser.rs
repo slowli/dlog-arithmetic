@@ -266,7 +266,10 @@ fn string(input: Span) -> NomResult<String> {
             map(tag_char('n'), |_| "\n"),
         )),
     );
-    preceded(tag_char('"'), cut(terminated(parser, tag_char('"'))))(input)
+    map(
+        preceded(tag_char('"'), cut(terminated(opt(parser), tag_char('"')))),
+        |maybe_string| maybe_string.unwrap_or_default(),
+    )(input)
 }
 
 /// Hex-encoded buffer like `0x09abcd`.

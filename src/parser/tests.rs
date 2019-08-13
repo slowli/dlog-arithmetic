@@ -118,6 +118,8 @@ fn string_literal_works() {
     assert_eq!(string(input).unwrap().1, r#"Hello, "world"!"#);
     let input = Span::new(r#""Hello,\nworld!";"#);
     assert_eq!(string(input).unwrap().1, "Hello,\nworld!");
+    let input = Span::new(r#""";"#);
+    assert_eq!(string(input).unwrap().1, "");
 
     // Unfinished string literal.
     let input = Span::new("\"Hello, world!\n");
