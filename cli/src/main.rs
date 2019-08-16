@@ -5,7 +5,6 @@ use codespan_reporting::{
     Diagnostic, Label, LabelStyle, Severity,
 };
 use dlog_arithmetic::{
-    functions as fns,
     parser::{Error as ParseError, Span, Spanned, Statement},
     BacktraceElement, Code, Context, Ed25519, ErrorWithBacktrace, EvalError, Group, Scope, Value,
 };
@@ -252,13 +251,8 @@ fn main() {
     let mut code_map = CodeMap::new();
     let mut line_index = 0;
 
-    let mut state = Context::typed(Ed25519);
-    state
-        .innermost_scope()
-        .insert_native_fn("sc_sha512", fns::FromSha512)
-        .insert_native_fn("sc_rand", fns::Rand::new(thread_rng()))
-        .insert_var("O", Value::Element(Ed25519.identity_element()))
-        .insert_var("G", Value::Element(Ed25519.base_element()));
+    let mut state = Context::standard(Ed25519, thread_rng());
+    state.enable_type_inference();
     state.create_scope();
     let mut snippet = String::new();
     let mut prompt = ">>> ";

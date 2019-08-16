@@ -1,9 +1,10 @@
 use failure_derive::*;
+use rand_core::{CryptoRng, RngCore};
 use std::{borrow::Cow, collections::HashMap, fmt, ops, rc::Rc};
 use typed_arena::Arena;
 
 use crate::{
-    functions::{FnArgs, FnType, Function, InterpretedFn, NativeFn},
+    functions::{Assert, FnArgs, FnType, FromSha512, Function, InterpretedFn, NativeFn, Rand},
     groups::Group,
     parser::{
         create_span, create_span_ref, map_span, BinaryOp, Error as ParseError, Expr, LiteralType,
@@ -580,13 +581,9 @@ impl<'a, G: Group> Context<'a, G> {
         }
     }
 
-    /// Creates a new context with the type inference switched on.
-    pub fn typed(group: G) -> Self {
-        Self {
-            group,
-            scopes: vec![Scope::new()],
-            type_inference: true,
-        }
+    /// Switches on type inference of the evaluated statements / expressions.
+    pub fn enable_type_inference(&mut self) {
+        self.type_inference = true;
     }
 
     /// Returns an exclusive reference to the innermost scope.
@@ -961,6 +958,50 @@ impl<'a, G: Group> Context<'a, G> {
                 inner: e,
                 backtrace: backtrace.unwrap(),
             })
+    }
+}
+
+impl<G: Group> Context<'_, G>
+where
+    FromSha512: NativeFn<G>,
+{
+    /// Creates a standard context with predefined variables and functions.
+    ///
+    /// # Variables
+    ///
+    /// - `O`: the identity element of the group
+    /// - `G`: the group basepoint
+    /// - `true`, `false`: Boolean constants
+    ///
+    /// # Functions
+    ///
+    /// - `assert(bool)`: Asserts that a provided boolean expression is true. See [`Assert`].
+    /// - `sc_rand() -> Sc`: Generates a random scalar. See [`Rand`].
+    /// - `sc_sha512(...) -> Sc`: Generates a scalar based on the SHA-512 digest of the arguments.
+    ///   See [`FromSha512`].
+    ///
+    /// [`Assert`]: fns/struct.Assert.html
+    /// [`Rand`]: fns/struct.Rand.html
+    /// [`FromSha512`]: fns/struct.FromSha512.html
+    pub fn standard<R>(group: G, rng: R) -> Self
+    where
+        R: CryptoRng + RngCore + 'static,
+        Rand<R>: NativeFn<G>,
+    {
+        let mut scope = Scope::new();
+        scope
+            .insert_var("O", Value::Element(group.identity_element()))
+            .insert_var("G", Value::Element(group.base_element()))
+            .insert_var("true", Value::Bool(true))
+            .insert_var("false", Value::Bool(false))
+            .insert_native_fn("assert", Assert)
+            .insert_native_fn("sc_rand", Rand::new(rng))
+            .insert_native_fn("sc_sha512", FromSha512);
+        Self {
+            group,
+            scopes: vec![scope],
+            type_inference: false,
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+//! Hindley-Milner type inference algorithm.
+
 use failure_derive::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -593,24 +595,12 @@ impl<'a, 'ctx, G: Group> TypeContext<'a, 'ctx, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        functions::{FromSha512, Rand},
-        parser::Span,
-        Ed25519,
-    };
+    use crate::{parser::Span, Ed25519};
     use assert_matches::assert_matches;
     use rand::thread_rng;
 
     fn create_context(_: &str) -> Context<Ed25519> {
-        let mut context = Context::new(Ed25519);
-        context
-            .innermost_scope()
-            .insert_var("G", Value::Element(Ed25519.base_element()))
-            .insert_var("true", Value::Bool(true))
-            .insert_var("false", Value::Bool(false))
-            .insert_native_fn("rand", Rand::new(thread_rng()))
-            .insert_native_fn("sha512", FromSha512);
-        context
+        Context::standard(Ed25519, thread_rng())
     }
 
     #[test]
@@ -645,8 +635,8 @@ mod tests {
     fn function_def() {
         let mut code = r#"
         fn sign(x, msg) {
-            (r, R) = :rand() * (1, G);
-            c = :sha512(R, msg);
+            (r, R) = :sc_rand() * (1, G);
+            c = :sc_sha512(R, msg);
             (R, r + c * x)
         }
         "#
@@ -670,10 +660,10 @@ mod tests {
             x == y
         }
         fn compare_hash(x, z) {
-            x == [:sha512(z)]G
+            x == [:sc_sha512(z)]G
         }
         fn add_hashes(x, y) {
-            :sha512(x, y) + :sha512(y, x)
+            :sc_sha512(x, y) + :sc_sha512(y, x)
         }
         "#
         .to_owned();
@@ -701,7 +691,7 @@ mod tests {
     fn type_hints_in_block() {
         let mut code = r#"
         fn hinted(x, (_, Z)) {
-            (r: Sc, R) = :rand() * x;
+            (r: Sc, R) = :sc_rand() * x;
             sum: Ge = R + Z;
             sum / r
         }
@@ -768,8 +758,8 @@ mod tests {
     fn function_with_arg_type_hint() {
         let mut code = r#"
         fn sign(x, msg: bytes) {
-            (r, R) = :rand() * (1, G);
-            c = :sha512(R, msg);
+            (r, R) = :sc_rand() * (1, G);
+            c = :sc_sha512(R, msg);
             (R, r + c * x)
         }
 
